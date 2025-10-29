@@ -171,9 +171,8 @@ def main():
     df_all.to_csv(DATA_DIR / "ALL.csv", index=False, encoding="utf-8-sig")
     for kw, g in df_all.groupby("키워드", sort=False):
         g.to_csv(DATA_DIR / f"{safe_name(kw)}.csv", index=False, encoding="utf-8-sig")
-    today = datetime.now().strftime("%Y%m%d")
-    df_new_final.to_csv(DATA_DIR / f"NEW_{today}.csv", index=False, encoding="utf-8-sig")
     df_new_final.to_csv(DATA_DIR / "NEW_latest.csv", index=False, encoding="utf-8-sig")
+
 
     print("🎉 저장 완료")
 
