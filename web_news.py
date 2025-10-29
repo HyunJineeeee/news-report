@@ -53,10 +53,13 @@ def parse_pub_date(text: str):
     if not text: return pd.NaT
     return pd.to_datetime(text, utc=True, errors="coerce")
 
-def to_kst_str_from_utc(ts):
-    if pd.isna(ts): return None
-    try: return ts.tz_convert("Asia/Seoul").strftime("%Y-%m-%d %H:%M")
-    except: return None
+def utc_to_kst_str(utc_ts):
+    """UTC Timestamp -> KST 문자열 'YYYY-MM-DD HH:MM' (항상 두 자리 시/분)"""
+    if pd.isna(utc_ts): return None
+    try:
+        return utc_ts.tz_convert("Asia/Seoul").strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return None
 
 def safe_name(name: str) -> str:
     return re.sub(r"[\\/:*?\[\]]", "_", str(name))[:64] or "Sheet"
@@ -77,17 +80,17 @@ def resolve_final_url(session: requests.Session, url: str, timeout: float = 10.0
 def crawl_google_news_rss(session: requests.Session, keyword: str):
     q = urllib.parse.quote(keyword)
     url = f"https://news.google.com/rss/search?q={q}&hl=ko&gl=KR&ceid=KR:ko"
-    resp = session.get(url, timeout=15)
+    resp = session.get(url, timeout=20)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "xml")  # lxml 필요
     items = soup.find_all("item")
 
-    collected_at = pd.Timestamp.utcnow()
+    collected_at_utc = pd.Timestamp.utcnow()
     rows = []
     for it in items:
         title = it.title.text if it.title else ""
         link = it.link.text if it.link else ""
-        pub_ts = parse_pub_date(it.pubDate.text if it.pubDate else "")
+        pub_ts_utc = parse_pub_date(it.pubDate.text if it.pubDate else "")
 
         final_link = resolve_final_url(session, link)
         rows.append({
@@ -95,8 +98,8 @@ def crawl_google_news_rss(session: requests.Session, keyword: str):
             "제목": title,
             "원문링크": final_link,                # 엑셀 하이퍼링크용
             "출처": extract_domain(final_link) or extract_domain(link),
-            "발행일_UTC": pub_ts,
-            "수집시각_UTC": collected_at,
+            "발행일_UTC": pub_ts_utc,
+            "수집시각_UTC": collected_at_utc,
             "_정규화링크": normalize_url(link),    # 중복제거 키(구글뉴스 기준)
         })
     print(f"✅ '{keyword}' {len(rows)}건")
@@ -111,14 +114,13 @@ def main():
     all_path = DATA_DIR / "ALL.csv"
     if all_path.exists():
         df_existing = pd.read_csv(all_path, dtype=str, encoding="utf-8-sig")
+        # 기존 파일은 문자열일 수 있으니 DateTime으로 해석(나중에 다시 문자열로 저장)
         df_existing["발행일(KST)"] = pd.to_datetime(df_existing["발행일(KST)"], errors="coerce")
         df_existing["수집시각(KST)"] = pd.to_datetime(df_existing["수집시각(KST)"], errors="coerce")
     else:
         df_existing = pd.DataFrame(columns=["키워드","제목","원문링크","발행일(KST)","수집시각(KST)","출처"])
 
     if not df_existing.empty:
-        # 내부용 컬럼 재구성
-        # 과거 파일에도 _정규화링크가 없을 수 있으므로 원문링크로라도 생성 시도
         base_norm = df_existing.get("원문링크", pd.Series("", index=df_existing.index)).fillna("")
         df_existing["_정규화링크"] = base_norm.apply(normalize_url)
         df_existing["_발행일_dt"] = pd.to_datetime(df_existing["발행일(KST)"], errors="coerce")
@@ -133,11 +135,13 @@ def main():
     df_new = pd.DataFrame(all_rows)
 
     if not df_new.empty:
-        df_new["발행일(KST)"] = df_new["발행일_UTC"].apply(to_kst_str_from_utc)
-        df_new["수집시각(KST)"] = df_new["수집시각_UTC"].apply(to_kst_str_from_utc)
+        # → 여기서 바로 24시간 문자열로 변환
+        df_new["발행일(KST)"] = df_new["발행일_UTC"].apply(utc_to_kst_str)
+        df_new["수집시각(KST)"] = df_new["수집시각_UTC"].apply(utc_to_kst_str)
+        # 내부 정렬용 dt
         df_new["_발행일_dt"] = pd.to_datetime(df_new["발행일(KST)"], errors="coerce")
         df_new["_수집시각_dt"] = pd.to_datetime(df_new["수집시각(KST)"], errors="coerce")
-
+        # 신규 판단(정규화 링크 기준)
         existing_norm = set(df_existing["_정규화링크"].dropna().astype(str)) if "_정규화링크" in df_existing.columns else set()
         df_new["_is_new"] = ~df_new["_정규화링크"].astype(str).isin(existing_norm)
     else:
@@ -159,29 +163,28 @@ def main():
     combined_display = combined.sort_values("_수집시각_dt", ascending=False, na_position="last")
     df_all = combined_display[out_cols].copy()
 
-    # ⚠ 발행일은 절대 보정하지 않음(원본에 없으면 빈 칸 유지)
-    # 수집시각은 비어있으면 내부 타임스탬프로 채우고, 그래도 없으면 지금(KST)
-    now_kst = pd.Timestamp.now(tz="Asia/Seoul").strftime("%Y-%m-%d %H:%M")
+    # ⚠ 발행일은 절대 보정하지 않음(빈 값 유지)
+    # 수집시각만 안전 보정 → 내부 dt로 채우고, 최종 문자열(24h)로 강제
     backfill_collect = pd.to_datetime(combined_display["_수집시각_dt"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
     df_all["수집시각(KST)"] = df_all["수집시각(KST)"].mask(df_all["수집시각(KST)"].isna(), backfill_collect)
-    df_all["수집시각(KST)"] = df_all["수집시각(KST)"].fillna(now_kst)
+    df_all["수집시각(KST)"] = df_all["수집시각(KST)"].fillna(pd.Timestamp.now(tz="Asia/Seoul").strftime("%Y-%m-%d %H:%M"))
+
+    # --- 날짜 열을 항상 문자열(24시간)로 강제 → 엑셀에서 '오전/오후' 방지 ---
+    for col in ["발행일(KST)", "수집시각(KST)"]:
+        if col in df_all.columns:
+            df_all[col] = pd.to_datetime(df_all[col], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
 
     # NEW: 이번 실행에서 '신규'만
     df_new_final = combined_display.loc[combined_display["_is_new"] == True, out_cols].copy()
     df_new_final = df_new_final.sort_values(["수집시각(KST)","발행일(KST)"], ascending=False)
-
-    # --- 날짜 형식을 문자열(24시간제)로 강제 변환 ---
     for col in ["발행일(KST)", "수집시각(KST)"]:
-        if col in df_all.columns:
-        df_all[col] = pd.to_datetime(df_all[col], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
         if col in df_new_final.columns:
-        df_new_final[col] = pd.to_datetime(df_new_final[col], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+            df_new_final[col] = pd.to_datetime(df_new_final[col], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
 
     # 5) 저장
     df_all.to_csv(DATA_DIR / "ALL.csv", index=False, encoding="utf-8-sig")
     for kw, g in df_all.groupby("키워드", sort=False):
         g.to_csv(DATA_DIR / f"{safe_name(kw)}.csv", index=False, encoding="utf-8-sig")
-    # 최신본만 저장 (날짜 버전 파일은 생성하지 않음)
     df_new_final.to_csv(DATA_DIR / "NEW_latest.csv", index=False, encoding="utf-8-sig")
 
     print("🎉 저장 완료")
