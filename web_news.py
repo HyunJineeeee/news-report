@@ -170,6 +170,10 @@ def main():
     df_new_final = combined_display.loc[combined_display["_is_new"] == True, out_cols].copy()
     df_new_final = df_new_final.sort_values(["수집시각(KST)","발행일(KST)"], ascending=False)
 
+    # 문자열로 변환해 Excel에서 형식 깨짐 방지 (09 유지)
+    df_all["발행일(KST)"] = df_all["발행일(KST)"].apply(lambda x: x if pd.isna(x) else str(x))
+    df_all["수집시각(KST)"] = df_all["수집시각(KST)"].apply(lambda x: x if pd.isna(x) else str(x))
+
     # 5) 저장
     df_all.to_csv(DATA_DIR / "ALL.csv", index=False, encoding="utf-8-sig")
     for kw, g in df_all.groupby("키워드", sort=False):
