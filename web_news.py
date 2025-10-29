@@ -170,9 +170,12 @@ def main():
     df_new_final = combined_display.loc[combined_display["_is_new"] == True, out_cols].copy()
     df_new_final = df_new_final.sort_values(["수집시각(KST)","발행일(KST)"], ascending=False)
 
-    # 문자열로 변환해 Excel에서 형식 깨짐 방지 (09 유지)
-    df_all["발행일(KST)"] = df_all["발행일(KST)"].apply(lambda x: x if pd.isna(x) else str(x))
-    df_all["수집시각(KST)"] = df_all["수집시각(KST)"].apply(lambda x: x if pd.isna(x) else str(x))
+    # --- 날짜 형식을 문자열(24시간제)로 강제 변환 ---
+    for col in ["발행일(KST)", "수집시각(KST)"]:
+        if col in df_all.columns:
+        df_all[col] = pd.to_datetime(df_all[col], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+        if col in df_new_final.columns:
+        df_new_final[col] = pd.to_datetime(df_new_final[col], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
 
     # 5) 저장
     df_all.to_csv(DATA_DIR / "ALL.csv", index=False, encoding="utf-8-sig")
