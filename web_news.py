@@ -56,7 +56,6 @@ def parse_pub_date(text: str):
     """RSS pubDate → UTC pandas.Timestamp (실패 시 NaT)"""
     if not text:
         return pd.NaT
-    # RFC822 문자열을 관대하게 파싱 + UTC로 고정
     return pd.to_datetime(text, utc=True, errors="coerce")
 
 def utc_to_kst_str(utc_ts):
@@ -92,10 +91,11 @@ def crawl_google_news_rss(session: requests.Session, keyword: str):
     url = f"https://news.google.com/rss/search?q={q}&hl=ko&gl=KR&ceid=KR:ko"
     resp = session.get(url, timeout=20)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "xml")  # lxml 필요
+    soup = BeautifulSoup(resp.text, "xml")  # lxml 파서 필요
     items = soup.find_all("item")
 
-    collected_at_utc = pd.Timestamp.utcnow()
+    collected_at_utc = pd.Timestamp.now(tz="UTC")  # ✅ tz-aware(UTC)
+
     rows = []
     for it in items:
         title = it.title.text if it.title else ""
@@ -162,7 +162,20 @@ def main():
         existing_norm = set(df_existing["_정규화링크"].dropna().astype(str)) if "_정규화링크" in df_existing.columns else set()
         df_new["_is_new"] = ~df_new["_정규화링크"].astype(str).isin(existing_norm)
     else:
-        df_new = pd.DataFrame(columns=df_existing.columns)
+        # 빈 데이터프레임일 때도 스키마를 맞춰 concat 경고 방지
+        df_new = pd.DataFrame(columns=[
+            "키워드","제목","원문링크","발행일(KST)","수집시각(KST)","출처",
+            "_정규화링크","_발행일_dt","_수집시각_dt","_is_new"
+        ])
+
+    # (옵션) concat 경고 방지용: 양쪽에 동일 스키마 보장
+    required = ["키워드","제목","원문링크","발행일(KST)","수집시각(KST)","출처",
+                "_정규화링크","_발행일_dt","_수집시각_dt","_is_new"]
+    for col in required:
+        if col not in df_existing.columns:
+            df_existing[col] = "" if col not in ["_발행일_dt","_수집시각_dt"] else pd.NaT
+        if col not in df_new.columns:
+            df_new[col] = "" if col not in ["_발행일_dt","_수집시각_dt"] else pd.NaT
 
     # 3) 병합 + 중복제거(수집 최신 우선)
     combined = pd.concat([df_existing, df_new], ignore_index=True)
@@ -176,12 +189,13 @@ def main():
     # 4) 표시/저장용 DF (6개 컬럼만, 순서 고정, 결측은 빈칸)
     out_cols = ["키워드","제목","원문링크","발행일(KST)","수집시각(KST)","출처"]
     combined_display = combined.sort_values("_수집시각_dt", ascending=False, na_position="last")
-
     df_all = combined_display[out_cols].copy()
-    # 수집시각은 내부 dt로 보정(비었으면 채움) → 문자열(24h) 강제
+
+    # 수집시각 보정: 내부 dt로 채우고, 남으면 현재 KST로 채움
     backfill_collect = pd.to_datetime(combined_display["_수집시각_dt"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
     df_all["수집시각(KST)"] = df_all["수집시각(KST)"].where(df_all["수집시각(KST)"].notna(), backfill_collect)
-    df_all["수집시각(KST)"] = df_all["수집시각(KST)"].fillna(pd.Timestamp.utcnow().tz_localize("UTC").tz_convert("Asia/Seoul").strftime("%Y-%m-%d %H:%M"))
+    now_kst_str = pd.Timestamp.now(tz="Asia/Seoul").strftime("%Y-%m-%d %H:%M")  # ✅ tz-aware KST 사용
+    df_all["수집시각(KST)"] = df_all["수집시각(KST)"].fillna(now_kst_str)
 
     # 발행일/수집시각은 항상 문자열, NaT/NaN → ""
     for col in ["발행일(KST)", "수집시각(KST)"]:
@@ -189,7 +203,7 @@ def main():
         df_all[col] = ser.dt.strftime("%Y-%m-%d %H:%M")
         df_all[col] = df_all[col].fillna("")
 
-    # NEW: 이번 실행에서 '신규'만
+    # NEW_latest: 이번 실행에서 '신규'만
     df_new_final = combined_display.loc[combined_display["_is_new"] == True, out_cols].copy()
     for col in ["발행일(KST)", "수집시각(KST)"]:
         ser = pd.to_datetime(df_new_final[col], errors="coerce")
