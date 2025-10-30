@@ -11,57 +11,41 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      MPLBACKEND: Agg   # matplotlib 서버 환경용 (화면 없는 환경에서 그래프 생성 가능)
     steps:
-      # 1️⃣ 레포 체크아웃
+      # 1) 레포 체크아웃
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2️⃣ Python 환경 세팅
+      # 2) Python 환경 세팅
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      - name: Install Korean fonts
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y fonts-nanum fonts-noto-cjk
-          fc-cache -fv
-
-      # 3️⃣ 의존성 설치
+      # 3) 의존성 설치
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 4️⃣ 뉴스 크롤링 실행
+      # 4) 뉴스 크롤링 실행
       - name: Run news crawler
         run: python web_news.py
 
-      # 5️⃣ 데이터 파이프라인 실행 (append-only, dedupe, charts)
+      # 5) 데이터 파이프라인 실행 (append-only, dedupe)
       - name: Run news pipeline
         run: |
           python tools/news_pipeline.py \
             --new-batch "data/*.csv" \
             --raw "data/news_raw.csv" \
-            --master "data/news_master.csv" \
-            --outdir "output"
+            --master "data/news_master.csv"
 
-      # 6️⃣ 결과물 커밋/푸시
+      # 6) 결과물 커밋/푸시
       - name: Commit and push updates
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/news_raw.csv data/news_master.csv output/*.png || true
+          git add data/news_raw.csv data/news_master.csv || true
           git commit -m "auto: daily update $(date -u +'%Y-%m-%dT%H:%MZ')" || echo "No changes"
-          git push
-
-      # 7️⃣ (선택) 생성된 그래프를 워크플로우 아티팩트로 저장
-      - name: Upload charts artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: top-keyword-charts
-          path: output/*.png
-          if-no-files-found: ignore
+          git push || true
