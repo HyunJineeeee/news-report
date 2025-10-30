@@ -1,40 +1,62 @@
 # -*- coding: utf-8 -*-
 """
-news_pipeline.py
+news_pipeline.py (최종 버전)
+---------------------------------------
 - append-only 원본 누적(raw)
 - 제목 유사도 기반 중복 제거 → 대표 기사 1건 선정(master)
 - 제목 기반 Top 키워드 Bar 차트 (주/월/분기)
 - ✅ 저장 시 컬럼 순서 고정:
     ["키워드", "제목", "원문링크", "발행일(KST)", "수집시각(KST)", "출처"]
-
-사용 예:
-    python tools/news_pipeline.py \
-        --new-batch "data/*.csv" \
-        --raw "data/news_raw.csv" \
-        --master "data/news_master.csv" \
-        --outdir "output" \
-        --sim-threshold 0.85
+- ✅ 차트 디자인 개선 / 한글 폰트(Nanum, Noto) 적용 / 값 라벨 표시
 """
 
 import argparse
 import glob
 import os
 import re
-from datetime import datetime
 from urllib.parse import urlparse
 
 import numpy as np
 import pandas as pd
+import matplotlib
+import matplotlib.pyplot as plt
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.neighbors import NearestNeighbors
-import matplotlib.pyplot as plt
 
 
-# ---------- 고정 출력 컬럼 ----------
+# ---------------------------------------------------------------------
+# 0. 그래프 테마 및 폰트 설정
+# ---------------------------------------------------------------------
+def setup_matplotlib_theme():
+    """폰트/스타일 기본 세팅"""
+    preferred_fonts = ["NanumGothic", "Noto Sans CJK KR", "AppleGothic", "Malgun Gothic"]
+    for fam in preferred_fonts:
+        try:
+            matplotlib.rcParams["font.family"] = fam
+            break
+        except Exception:
+            continue
+    matplotlib.rcParams["axes.unicode_minus"] = False
+    plt.style.use("ggplot")
+    matplotlib.rcParams.update({
+        "figure.dpi": 150,
+        "savefig.dpi": 300,
+        "axes.titleweight": "bold",
+        "axes.titlesize": 14,
+        "axes.labelsize": 12,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 11,
+        "axes.edgecolor": "#DDDDDD",
+        "grid.alpha": 0.4,
+    })
+
+
+# ---------------------------------------------------------------------
+# 1. 기본 설정 / 컬럼 정의
+# ---------------------------------------------------------------------
 KST_TZ = "Asia/Seoul"
 OUTPUT_ORDER = ["키워드", "제목", "원문링크", "발행일(KST)", "수집시각(KST)", "출처"]
 
-# ---------- 입력 컬럼 유추 후보 ----------
 COL_CANDIDATES = {
     "keyword": ["keyword", "키워드"],
     "title": ["title", "subject", "headline", "제목"],
@@ -42,11 +64,13 @@ COL_CANDIDATES = {
     "pub_date": ["pub_date", "date", "published_at", "publish_date", "발행일", "작성일"],
     "press": ["press", "source", "publisher", "언론사", "매체", "출처"],
     "collected_at": ["collected_at", "staged_at", "crawled_at", "수집일", "수집일자", "수집시각"],
-    "content": ["content", "summary", "본문", "요약"],  # 제목만 분석하므로 분석엔 미사용
+    "content": ["content", "summary", "본문", "요약"],
 }
 
 
-# ---------- 유틸 ----------
+# ---------------------------------------------------------------------
+# 2. 유틸 함수
+# ---------------------------------------------------------------------
 def extract_domain(u: str) -> str:
     try:
         return urlparse(str(u)).netloc.lower()
@@ -66,7 +90,6 @@ def map_columns(df: pd.DataFrame) -> pd.DataFrame:
                 return cols_lower[cand.lower()]
         return None
 
-    # 존재하지 않으면 생성
     for std, cands in COL_CANDIDATES.items():
         chosen = choose(cands)
         if chosen is None:
@@ -75,12 +98,10 @@ def map_columns(df: pd.DataFrame) -> pd.DataFrame:
             if chosen != std:
                 df.rename(columns={chosen: std}, inplace=True)
 
-    # 날짜 파싱
     for dcol in ["pub_date", "collected_at"]:
         if dcol in df.columns:
             df[dcol] = pd.to_datetime(df[dcol], errors="coerce")
 
-    # press 없으면 URL에서 도메인 추출
     if "press" in df.columns and "url" in df.columns:
         df["press"] = df["press"].fillna("")
         empty_press = df["press"].astype(str).str.strip().eq("")
@@ -96,7 +117,6 @@ def to_kst_ts(ts):
     ts = pd.to_datetime(ts, errors="coerce")
     if ts is pd.NaT or ts is None:
         return pd.NaT
-    # tz-naive면 KST로 간주, tz-aware면 KST로 변환
     try:
         if ts.tzinfo is None or ts.tzinfo.utcoffset(ts) is None:
             return ts.tz_localize(KST_TZ)
@@ -107,33 +127,22 @@ def to_kst_ts(ts):
 
 
 def format_output_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    내부 표준 컬럼(keyword/title/url/pub_date/collected_at/press)을
-    최종 출력 컬럼(한글명, KST 시각 문자열)로 변환 & 순서 고정.
-    """
+    """최종 저장용 컬럼 순서/형식 변환"""
     out = pd.DataFrame(index=df.index.copy())
-
-    # 키워드: 있으면 사용, 없으면 공백
     out["키워드"] = df.get("keyword", "").fillna("").astype(str)
-
-    # 제목 / 원문링크 / 출처
     out["제목"] = df.get("title", "").astype(str)
     out["원문링크"] = df.get("url", "").astype(str)
     out["출처"] = df.get("press", "").astype(str)
-
-    # 발행일/수집시각 → KST 문자열
     pub_kst = pd.to_datetime(df.get("pub_date", pd.NaT), errors="coerce").apply(to_kst_ts)
     col_kst = pd.to_datetime(df.get("collected_at", pd.NaT), errors="coerce").apply(to_kst_ts)
-
     out["발행일(KST)"] = pub_kst.dt.strftime("%Y-%m-%d %H:%M").fillna("")
     out["수집시각(KST)"] = col_kst.dt.strftime("%Y-%m-%d %H:%M").fillna("")
-
-    # 순서 강제
-    out = out.reindex(columns=OUTPUT_ORDER)
-    return out
+    return out.reindex(columns=OUTPUT_ORDER)
 
 
-# ---------- 1) 원본 누적(append-only) ----------
+# ---------------------------------------------------------------------
+# 3. 데이터 적재 / append-only
+# ---------------------------------------------------------------------
 def load_csvs(patterns):
     paths = []
     for p in patterns:
@@ -151,7 +160,6 @@ def load_csvs(patterns):
 
 
 def anti_join_by_url_title(raw: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
-    # URL + 제목 키 조합으로 기존 존재 여부를 체크
     def keyify(s):
         return s.fillna("").astype(str)
 
@@ -166,35 +174,29 @@ def anti_join_by_url_title(raw: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFr
 
 
 def append_only_raw(raw_path: str, new_batch_paths) -> pd.DataFrame:
-    # 기존 raw 불러오기
     if os.path.exists(raw_path):
         raw = pd.read_csv(raw_path)
-        # 기존 파일이 이미 한글 컬럼일 수 있으므로 다시 표준 컬럼으로 복원 시도
         raw_std = raw.rename(columns={
             "키워드": "keyword",
             "제목": "title",
             "원문링크": "url",
-            "발행일(KST)": "pub_date",       # 문자열일 수 있음(아래에서 재가공)
-            "수집시각(KST)": "collected_at",  # 문자열일 수 있음
+            "발행일(KST)": "pub_date",
+            "수집시각(KST)": "collected_at",
             "출처": "press",
         })
         raw = map_columns(raw_std)
     else:
         raw = pd.DataFrame(columns=list(COL_CANDIDATES.keys()))
 
-    # 신규 배치
     new_df = load_csvs(new_batch_paths)
     if new_df.empty:
         print("[INFO] 신규 배치 없음.")
         return raw
 
     new_df = map_columns(new_df)
-
-    # collected_at 비어 있으면 지금 시각 부여
     if "collected_at" in new_df.columns:
         new_df["collected_at"] = new_df["collected_at"].fillna(pd.Timestamp.now())
 
-    # 원본 중복 1차 필터링 후 append
     new_df = anti_join_by_url_title(raw, new_df)
     if new_df.empty:
         print("[INFO] 추가할 신규 레코드가 없음.")
@@ -204,9 +206,10 @@ def append_only_raw(raw_path: str, new_batch_paths) -> pd.DataFrame:
     return appended
 
 
-# ---------- 2) 제목 유사도 기반 중복 제거(클러스터링) ----------
+# ---------------------------------------------------------------------
+# 4. 제목 유사도 기반 중복 제거
+# ---------------------------------------------------------------------
 PREFERRED_DOMAINS = [
-    # 조직 기준에 맞게 조정 가능(상위일수록 가점)
     "yna.co.kr", "news1.kr", "newsis.com", "sedaily.com", "hankyung.com",
     "mk.co.kr", "heraldcorp.com", "chosun.com", "joongang.co.kr", "hani.co.kr",
 ]
@@ -224,13 +227,10 @@ def domain_score(u: str) -> int:
 
 def build_title_clusters(df: pd.DataFrame, sim_threshold=0.85, n_neighbors=10):
     titles = df["title"].fillna("").astype(str)
-
     vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4), min_df=1)
     X = vec.fit_transform(titles)
-
     nn = NearestNeighbors(metric="cosine", n_neighbors=min(n_neighbors, X.shape[0])).fit(X)
     distances, indices = nn.kneighbors(X)
-
     thr_dist = 1 - sim_threshold
     parent = list(range(len(df)))
 
@@ -256,23 +256,17 @@ def build_title_clusters(df: pd.DataFrame, sim_threshold=0.85, n_neighbors=10):
     for i in range(len(df)):
         r = find(i)
         groups.setdefault(r, []).append(i)
-
     return groups
 
 
 def choose_representative(df: pd.DataFrame, idxs: list[int]) -> int:
     subset = df.iloc[idxs].copy()
-
     subset["dom_score"] = subset["url"].apply(domain_score)
-    # 날짜: pub_date 우선, 없으면 collected_at
     if "pub_date" in subset.columns:
         subset["_date"] = pd.to_datetime(subset["pub_date"], errors="coerce")
     else:
         subset["_date"] = pd.to_datetime(subset["collected_at"], errors="coerce")
-
     subset["title_len"] = subset["title"].astype(str).str.len()
-
-    # 정렬 규칙: dom_score desc → _date asc → title_len desc
     subset = subset.sort_values(by=["dom_score", "_date", "title_len"],
                                 ascending=[False, True, False])
     return subset.index[0]
@@ -282,11 +276,9 @@ def dedupe_by_title_similarity(raw_df: pd.DataFrame,
                                sim_threshold=0.85) -> pd.DataFrame:
     if raw_df.empty:
         return raw_df
-
     for c in ["title", "url"]:
         if c not in raw_df.columns:
             raw_df[c] = ""
-
     groups = build_title_clusters(raw_df, sim_threshold=sim_threshold)
     rep_indices = [choose_representative(raw_df, rows) for rows in groups.values()]
     deduped = raw_df.loc[sorted(set(rep_indices))].copy()
@@ -294,40 +286,48 @@ def dedupe_by_title_similarity(raw_df: pd.DataFrame,
     return deduped
 
 
-# ---------- 3) 키워드 빈도(제목만) → Bar 차트 ----------
+# ---------------------------------------------------------------------
+# 5. 키워드 분석 / 시각화
+# ---------------------------------------------------------------------
 STOPWORDS = {
-    # 업무 고유명사는 불용어 처리 (필요시 추가)
-    "일학습병행", "직업훈련", "고용노동부", "한국산업인력공단",
-    "기사", "사진", "영상", "보도", "속보", "단독", "종합", "인터뷰",
-    "기자", "뉴스", "관련", "정부", "사업", "지원", "추진"
+    "일학습병행","직업훈련","고용노동부","한국산업인력공단",
+    "네이버","다음","daum","naver","kr","com","net","co","news","연합뉴스",
+    "기사","사진","영상","보도","속보","단독","종합","인터뷰",
+    "기자","관련","정부","사업","지원","추진"
 }
 
 
 def normalize_title_korean(text: str) -> list[str]:
-    """
-    간단 토큰화:
-      - 한글/영문/숫자만 남기고 공백 분리
-      - 1글자 토큰 제거
-      - 불용어 제거
-    """
-    if not isinstance(text, str):
+    if not isinstance(text, str) or not text.strip():
         return []
     cleaned = re.sub(r"[^0-9A-Za-z가-힣\s]", " ", text)
-    toks = [t for t in re.split(r"\s+", cleaned.strip()) if len(t) > 1]
-    toks = [t for t in toks if t not in STOPWORDS]
-    return toks
+    toks = [t for t in re.split(r"\s+", cleaned.strip()) if t]
+    out = []
+    for t in toks:
+        if len(t) < 2:
+            continue
+        if re.fullmatch(r"\d+", t):
+            continue
+        if re.fullmatch(r"20\d{2}", t):
+            continue
+        if re.fullmatch(r"[A-Za-z]{2,5}", t) and t.lower() in {"kr","com","net","co"}:
+            continue
+        if t in STOPWORDS:
+            continue
+        out.append(t)
+    return out
 
 
-def top_keywords_bar(df: pd.DataFrame, outdir: str, period: str = "W", top_k=30):
-    """
-    period: 'W' (주), 'M' (월), 'Q' (분기)
-    기준 날짜: pub_date → collected_at
-    """
+def _prettify_axes(ax):
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+
+
+def top_keywords_bar(df: pd.DataFrame, outdir: str, period: str = "W", top_k=25):
     if df.empty:
         return
     os.makedirs(outdir, exist_ok=True)
 
-    # 기준 날짜
     if "pub_date" in df.columns and not df["pub_date"].isna().all():
         base_date = pd.to_datetime(df["pub_date"], errors="coerce")
     elif "collected_at" in df.columns and not df["collected_at"].isna().all():
@@ -348,27 +348,43 @@ def top_keywords_bar(df: pd.DataFrame, outdir: str, period: str = "W", top_k=30)
             continue
         vc = pd.Series(tokens).value_counts().head(top_k)
 
-        plt.figure(figsize=(10, 6))
-        plt.barh(vc.index[::-1], vc.values[::-1])
-        plt.title(f"Top Keywords ({period}) - {pval.date()}")
-        plt.tight_layout()
+        h = max(5, 0.35 * len(vc) + 1.5)
+        fig, ax = plt.subplots(figsize=(10, h))
+        bars = ax.barh(vc.index[::-1], vc.values[::-1])
+
+        for rect in bars:
+            w = rect.get_width()
+            ax.text(w + max(vc.values) * 0.01, rect.get_y() + rect.get_height()/2,
+                    f"{int(w)}", va="center", ha="left", fontsize=10)
+
+        ax.set_xlabel("빈도")
+        ax.set_ylabel("")
+        ax.set_title(f"Top Keywords ({period}) - {pval.date()}")
+        ax.grid(axis="x")
+        _prettify_axes(ax)
+        ax.margins(x=0.05)
 
         fname = f"top_keywords_{period}_{pval.date()}.png"
         save_path = os.path.join(outdir, fname)
-        plt.savefig(save_path, dpi=200)
-        plt.close()
+        plt.tight_layout()
+        plt.savefig(save_path, bbox_inches="tight")
+        plt.close(fig)
         print(f"[OK] 저장: {save_path}")
 
 
-# ---------- 엔드투엔드 ----------
+# ---------------------------------------------------------------------
+# 6. 엔드투엔드 실행
+# ---------------------------------------------------------------------
 def main():
+    setup_matplotlib_theme()
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--new-batch", nargs="+", default=["data/*.csv"],
-                    help="신규 배치 CSV 경로(글롭 가능) 다건")
+                    help="신규 배치 CSV 경로(글롭 가능)")
     ap.add_argument("--raw", default="data/news_raw.csv",
-                    help="append-only 원본 CSV 경로(저장 시 컬럼 순서 고정)")
+                    help="append-only 원본 CSV 경로")
     ap.add_argument("--master", default="data/news_master.csv",
-                    help="중복 제거/정제 결과 CSV 경로(저장 시 컬럼 순서 고정)")
+                    help="중복 제거/정제 결과 CSV 경로")
     ap.add_argument("--outdir", default="output",
                     help="차트/결과물 출력 폴더")
     ap.add_argument("--sim-threshold", type=float, default=0.85,
@@ -379,26 +395,20 @@ def main():
     os.makedirs(os.path.dirname(args.master), exist_ok=True)
     os.makedirs(args.outdir, exist_ok=True)
 
-    # 1) 원본 append-only (아직은 내부 표준 컬럼)
     raw_std = append_only_raw(args.raw, args.new_batch)
-
-    # 2) 제목 유사도 중복 제거 → 대표 1건 (내부 표준 컬럼)
     master_std = dedupe_by_title_similarity(raw_std, sim_threshold=args.sim_threshold)
 
-    # 3) 저장 직전에 컬럼을 한글/순서 고정으로 변환
     raw_out = format_output_columns(raw_std)
     master_out = format_output_columns(master_std)
 
-    # 4) CSV 저장 (UTF-8 with BOM, 엑셀 호환)
     raw_out.to_csv(args.raw, index=False, encoding="utf-8-sig")
     print(f"[OK] raw 저장(고정 컬럼): {args.raw} (rows={len(raw_out)})")
 
     master_out.to_csv(args.master, index=False, encoding="utf-8-sig")
     print(f"[OK] master 저장(고정 컬럼): {args.master} (rows={len(master_out)})")
 
-    # 5) 제목기반 Top 키워드 bar 차트 (주/월/분기) - master 기준
     for period in ["W", "M", "Q"]:
-        top_keywords_bar(master_std, args.outdir, period=period, top_k=30)
+        top_keywords_bar(master_std, args.outdir, period=period, top_k=25)
 
 
 if __name__ == "__main__":
