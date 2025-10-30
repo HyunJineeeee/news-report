@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-news_pipeline.py (최종)
+news_pipeline.py (정리 슬림 버전)
 ---------------------------------------
 - append-only 원본 누적(raw)
 - 제목 유사도 기반 중복 제거 → 대표 기사 1건 선정(master)
 - 저장 시 컬럼 순서 고정:
   ["키워드","제목","원문링크","발행일(KST)","수집시각(KST)","출처"]
-- 수정 포인트:
-  * collected_at을 tz-aware(KST)로 기록 → 정확한 KST 표시
-  * 문자열 컬럼은 fillna("") 후 astype(str) → "nan" 문자열 방지
-  * 기존/입력 CSV의 중복 헤더 안전 병합
-  * data/*.csv 로딩 시 news_raw.csv/news_master.csv는 제외(자기 재흡수 방지)
+- 포인트:
+  * collected_at을 tz-aware(KST)로 기록
+  * 문자열 컬럼은 fillna("") 후 astype(str) → "nan" 방지
+  * 입력 CSV 헤더 표준화 + 중복 헤더 병합
+  * data/*.csv 로딩 시 news_raw.csv/news_master.csv 제외
 """
 
 import argparse
@@ -18,14 +18,13 @@ import glob
 import os
 from urllib.parse import urlparse
 
-import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.neighbors import NearestNeighbors
 
 
 # ---------------------------------------------------------------------
-# 1) 설정 / 컬럼 정의
+# 설정 / 컬럼 정의
 # ---------------------------------------------------------------------
 KST_TZ = "Asia/Seoul"
 OUTPUT_ORDER = ["키워드", "제목", "원문링크", "발행일(KST)", "수집시각(KST)", "출처"]
@@ -41,7 +40,7 @@ COL_CANDIDATES = {
 
 
 # ---------------------------------------------------------------------
-# 2) 유틸
+# 유틸
 # ---------------------------------------------------------------------
 def extract_domain(u: str) -> str:
     try:
@@ -55,10 +54,9 @@ def to_kst_ts(ts):
     if pd.isna(ts):
         return pd.NaT
     ts = pd.to_datetime(ts, errors="coerce")
-    if ts is pd.NaT or ts is None:
+    if pd.isna(ts):
         return pd.NaT
     try:
-        # naive → KST로 로컬라이즈 / aware → KST로 컨버트
         if ts.tzinfo is None or ts.tzinfo.utcoffset(ts) is None:
             return ts.tz_localize(KST_TZ)
         else:
@@ -81,7 +79,6 @@ def format_output_columns(df: pd.DataFrame) -> pd.DataFrame:
     out["발행일(KST)"] = pub_kst.dt.strftime("%Y-%m-%d %H:%M").fillna("")
     out["수집시각(KST)"] = col_kst.dt.strftime("%Y-%m-%d %H:%M").fillna("")
 
-    # 순서 강제
     return out.loc[:, OUTPUT_ORDER]
 
 
@@ -97,16 +94,16 @@ def map_columns(df: pd.DataFrame) -> pd.DataFrame:
                 return cols_lower[cand.lower()]
         return None
 
-    # 1) 표준명으로 리네임(없으면 생성)
+    # 표준명으로 리네임(없으면 생성)
     for std, cands in COL_CANDIDATES.items():
         chosen = choose(cands)
         if chosen is None:
-            df[std] = pd.Series([np.nan] * len(df))
+            df[std] = pd.Series([pd.NA] * len(df))
         else:
             if chosen != std:
                 df.rename(columns={chosen: std}, inplace=True)
 
-    # 2) 중복 헤더 병합 (먼저 채워진 값 우선)
+    # 중복 헤더 병합 (먼저 채워진 값 우선)
     if df.columns.duplicated().any():
         dup_names = set(df.columns[df.columns.duplicated(keep=False)])
         for name in dup_names:
@@ -115,7 +112,7 @@ def map_columns(df: pd.DataFrame) -> pd.DataFrame:
             df.drop(columns=[df.columns[i] for i in same_cols], inplace=True)
             df[name] = merged
 
-    # 3) 날짜 파싱(Series만 유지)
+    # 날짜 파싱
     for dcol in ["pub_date", "collected_at"]:
         if dcol in df.columns:
             ser = df[dcol]
@@ -123,10 +120,10 @@ def map_columns(df: pd.DataFrame) -> pd.DataFrame:
                 ser = ser.bfill(axis=1).iloc[:, 0]
             df[dcol] = pd.to_datetime(ser, errors="coerce")
 
-    # 4) press 없으면 URL에서 도메인 추출
+    # press 없으면 URL에서 도메인 추출
     if "press" in df.columns and "url" in df.columns:
         df["press"] = df["press"].fillna("")
-        empty_press = df["press"].astype(str).str.strip().eq("")
+        empty_press = df["press"].astype(str).strip().eq("")
         if empty_press.any():
             df.loc[empty_press, "press"] = df.loc[empty_press, "url"].apply(extract_domain)
 
@@ -134,12 +131,12 @@ def map_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------
-# 3) 적재 / append-only
+# 적재 / append-only
 # ---------------------------------------------------------------------
 def load_csvs(patterns):
-    """입력 CSV들 로딩 (출력 파일은 제외)"""
+    """입력 CSV 로딩 (출력 파일 제외)"""
     paths, frames = [], []
-    ignore = {"news_raw.csv", "news_master.csv"}  # 출력물은 신규 배치에서 제외
+    ignore = {"news_raw.csv", "news_master.csv"}
     for p in patterns:
         paths.extend(glob.glob(p))
     for path in sorted(set(paths)):
@@ -155,6 +152,7 @@ def load_csvs(patterns):
 
 
 def anti_join_by_url_title(raw: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
+    """동일 URL+제목 1차 중복 제거 (성능/용량 보호)"""
     def keyify(s):
         return s.fillna("").astype(str)
 
@@ -169,7 +167,7 @@ def anti_join_by_url_title(raw: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFr
 
 
 def append_only_raw(raw_path: str, new_batch_paths) -> pd.DataFrame:
-    # 기존 raw 로딩(한글 컬럼 → 표준 컬럼 역매핑 포함)
+    # 기존 raw 로딩(한글 컬럼 → 표준 컬럼 역매핑)
     if os.path.exists(raw_path):
         raw = pd.read_csv(raw_path)
         raw_std = raw.rename(columns={
@@ -196,18 +194,17 @@ def append_only_raw(raw_path: str, new_batch_paths) -> pd.DataFrame:
     if "collected_at" in new_df.columns:
         new_df["collected_at"] = new_df["collected_at"].fillna(pd.Timestamp.now(tz=KST_TZ))
 
-    # 1차 중복 제거(동일 URL+제목)
+    # 1차 중복 제거
     new_df = anti_join_by_url_title(raw, new_df)
     if new_df.empty:
         print("[INFO] 추가할 신규 레코드가 없음.")
         return raw
 
-    appended = pd.concat([raw, new_df], ignore_index=True)
-    return appended
+    return pd.concat([raw, new_df], ignore_index=True)
 
 
 # ---------------------------------------------------------------------
-# 4) 제목 유사도 기반 중복 제거
+# 제목 유사도 기반 중복 제거
 # ---------------------------------------------------------------------
 PREFERRED_DOMAINS = [
     "yna.co.kr", "news1.kr", "newsis.com", "sedaily.com", "hankyung.com",
@@ -262,10 +259,11 @@ def build_title_clusters(df: pd.DataFrame, sim_threshold=0.85, n_neighbors=10):
 def choose_representative(df: pd.DataFrame, idxs: list[int]) -> int:
     subset = df.iloc[idxs].copy()
     subset["dom_score"] = subset["url"].apply(domain_score)
-    if "pub_date" in subset.columns:
-        subset["_date"] = pd.to_datetime(subset["pub_date"], errors="coerce")
-    else:
-        subset["_date"] = pd.to_datetime(subset["collected_at"], errors="coerce")
+    # 날짜: pub_date 우선, 없으면 collected_at
+    subset["_date"] = pd.to_datetime(
+        subset["pub_date"] if "pub_date" in subset.columns else subset["collected_at"],
+        errors="coerce"
+    )
     subset["title_len"] = subset["title"].astype(str).str.len()
     subset = subset.sort_values(by=["dom_score", "_date", "title_len"],
                                 ascending=[False, True, False])
@@ -286,7 +284,7 @@ def dedupe_by_title_similarity(raw_df: pd.DataFrame, sim_threshold=0.85) -> pd.D
 
 
 # ---------------------------------------------------------------------
-# 5) 엔드투엔드
+# 엔드투엔드
 # ---------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
@@ -302,15 +300,15 @@ def main():
     raw_std = append_only_raw(args.raw, args.new_batch)
     master_std = dedupe_by_title_similarity(raw_std, sim_threshold=args.sim_threshold)
 
-    # 저장 직전, 반드시 6개 컬럼만(순서 고정)으로 투영
+    # 저장 직전, 6개 컬럼만(순서 고정)으로 투영
     raw_out = format_output_columns(raw_std).loc[:, OUTPUT_ORDER]
     master_out = format_output_columns(master_std).loc[:, OUTPUT_ORDER]
 
     raw_out.to_csv(args.raw, index=False, encoding="utf-8-sig")
-    print(f"[OK] raw 저장(고정 컬럼): {args.raw} (rows={len(raw_out)})")
+    print(f"[OK] raw 저장: {args.raw} (rows={len(raw_out)})")
 
     master_out.to_csv(args.master, index=False, encoding="utf-8-sig")
-    print(f"[OK] master 저장(고정 컬럼): {args.master} (rows={len(master_out)})")
+    print(f"[OK] master 저장: {args.master} (rows={len(master_out)})")
 
 
 if __name__ == "__main__":
