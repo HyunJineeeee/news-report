@@ -290,6 +290,13 @@ def main():
     raw_out = format_output_columns(raw_std)
     master_out = format_output_columns(master_std)
 
+    raw_out = format_output_columns(raw_std).loc[:, ["키워드","제목","원문링크","발행일(KST)","수집시각(KST)","출처"]]
+    master_out = format_output_columns(master_std).loc[:, ["키워드","제목","원문링크","발행일(KST)","수집시각(KST)","출처"]]
+
+    raw_out.to_csv(args.raw, index=False, encoding="utf-8-sig")
+    master_out.to_csv(args.master, index=False, encoding="utf-8-sig")
+
+
     raw_out.to_csv(args.raw, index=False, encoding="utf-8-sig")
     print(f"[OK] raw 저장(고정 컬럼): {args.raw} (rows={len(raw_out)})")
 
