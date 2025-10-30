@@ -12,3 +12,4 @@ lxml>=4.9.0
 # Data Analysis / Visualization
 scikit-learn>=1.4.0
 matplotlib>=3.9.0
+wordcloud
