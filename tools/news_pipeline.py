@@ -90,6 +90,7 @@ def map_columns(df: pd.DataFrame) -> pd.DataFrame:
                 return cols_lower[cand.lower()]
         return None
 
+    # 1) 표준 컬럼명으로 리네임 / 없으면 생성
     for std, cands in COL_CANDIDATES.items():
         chosen = choose(cands)
         if chosen is None:
@@ -98,10 +99,28 @@ def map_columns(df: pd.DataFrame) -> pd.DataFrame:
             if chosen != std:
                 df.rename(columns={chosen: std}, inplace=True)
 
+    # 2) 🔧 같은 이름의 컬럼이 둘 이상이면 하나로 병합 (먼저 나오는 값 우선)
+    #    예: ['pub_date','pub_date'] 같은 중복 헤더
+    if df.columns.duplicated().any():
+        dup_names = set(df.columns[df.columns.duplicated(keep=False)])
+        for name in dup_names:
+            # 해당 이름의 모든 컬럼을 모아 앞쪽 값으로 채우기
+            same_cols = [i for i, c in enumerate(df.columns) if c == name]
+            merged = df.iloc[:, same_cols].bfill(axis=1).iloc[:, 0]
+            # 기존 중복 컬럼들 제거 후 하나만 남김
+            df.drop(columns=[df.columns[i] for i in same_cols], inplace=True)
+            df[name] = merged
+
+    # 3) 날짜 파싱 (여기서부터는 단일 Series 보장)
     for dcol in ["pub_date", "collected_at"]:
         if dcol in df.columns:
-            df[dcol] = pd.to_datetime(df[dcol], errors="coerce")
+            ser = df[dcol]
+            # 혹시 모를 DataFrame 방지(이중 안전장치)
+            if isinstance(ser, pd.DataFrame):
+                ser = ser.bfill(axis=1).iloc[:, 0]
+            df[dcol] = pd.to_datetime(ser, errors="coerce")
 
+    # 4) press 없으면 URL에서 도메인 추출
     if "press" in df.columns and "url" in df.columns:
         df["press"] = df["press"].fillna("")
         empty_press = df["press"].astype(str).str.strip().eq("")
