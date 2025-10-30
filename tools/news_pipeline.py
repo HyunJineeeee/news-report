@@ -90,18 +90,32 @@ def format_output_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def map_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """입력 CSV의 다양한 헤더를 표준 컬럼으로 정규화 + 중복 헤더 병합"""
+    """입력 CSV의 다양한 헤더를 표준 컬럼으로 정규화 + 중복 헤더 병합 + 헤더 클린업"""
+    # 0) 🔧 헤더 클린업: 앞뒤 공백 제거 + BOM 제거
+    if len(df.columns):
+        cleaned = {}
+        for c in df.columns:
+            nc = str(c)
+            nc = nc.replace("\ufeff", "")  # BOM 제거
+            nc = nc.strip()                # 앞뒤 공백 제거
+            cleaned[c] = nc
+        if any(k != v for k, v in cleaned.items()):
+            df = df.rename(columns=cleaned)
+
     cols_lower = {c.lower(): c for c in df.columns}
 
     def choose(cands):
         for cand in cands:
+            # 정확 일치
             if cand in df.columns:
                 return cand
-            if cand.lower() in cols_lower:
-                return cols_lower[cand.lower()]
+            # 소문자 비교(공백/BOM 제거 후)
+            cl = cand.lower()
+            if cl in cols_lower:
+                return cols_lower[cl]
         return None
 
-    # 표준명으로 리네임(없으면 생성)
+    # 1) 표준명으로 리네임(없으면 생성)
     for std, cands in COL_CANDIDATES.items():
         chosen = choose(cands)
         if chosen is None:
@@ -110,7 +124,7 @@ def map_columns(df: pd.DataFrame) -> pd.DataFrame:
             if chosen != std:
                 df.rename(columns={chosen: std}, inplace=True)
 
-    # 중복 헤더 병합 (먼저 채워진 값 우선)
+    # 2) 중복 헤더 병합 (먼저 채워진 값 우선)
     if df.columns.duplicated().any():
         dup_names = set(df.columns[df.columns.duplicated(keep=False)])
         for name in dup_names:
@@ -119,7 +133,7 @@ def map_columns(df: pd.DataFrame) -> pd.DataFrame:
             df.drop(columns=[df.columns[i] for i in same_cols], inplace=True)
             df[name] = merged
 
-    # 날짜 파싱
+    # 3) 날짜 파싱 (문자열 → Timestamp)
     for dcol in ["pub_date", "collected_at"]:
         if dcol in df.columns:
             ser = df[dcol]
@@ -127,15 +141,15 @@ def map_columns(df: pd.DataFrame) -> pd.DataFrame:
                 ser = ser.bfill(axis=1).iloc[:, 0]
             df[dcol] = pd.to_datetime(ser, errors="coerce")
 
-    # press 없으면 URL에서 도메인 추출
+    # 4) press 없으면 URL에서 도메인 추출
     if "press" in df.columns and "url" in df.columns:
         df["press"] = df["press"].fillna("")
-        # 🔧 BUGFIX: .strip() → .str.strip()
         empty_press = df["press"].astype(str).str.strip().eq("")
         if empty_press.any():
             df.loc[empty_press, "press"] = df.loc[empty_press, "url"].apply(extract_domain)
 
     return df
+
 
 
 # ---------------------------------------------------------------------
