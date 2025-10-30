@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-news_pipeline.py (정리 슬림 버전)
+news_pipeline.py (정리 슬림 버전 + 버그픽스)
 ---------------------------------------
 - append-only 원본 누적(raw)
 - 제목 유사도 기반 중복 제거 → 대표 기사 1건 선정(master)
@@ -123,7 +123,8 @@ def map_columns(df: pd.DataFrame) -> pd.DataFrame:
     # press 없으면 URL에서 도메인 추출
     if "press" in df.columns and "url" in df.columns:
         df["press"] = df["press"].fillna("")
-        empty_press = df["press"].astype(str).strip().eq("")
+        # 🔧 BUGFIX: .strip() → .str.strip()
+        empty_press = df["press"].astype(str).str.strip().eq("")
         if empty_press.any():
             df.loc[empty_press, "press"] = df.loc[empty_press, "url"].apply(extract_domain)
 
@@ -259,7 +260,6 @@ def build_title_clusters(df: pd.DataFrame, sim_threshold=0.85, n_neighbors=10):
 def choose_representative(df: pd.DataFrame, idxs: list[int]) -> int:
     subset = df.iloc[idxs].copy()
     subset["dom_score"] = subset["url"].apply(domain_score)
-    # 날짜: pub_date 우선, 없으면 collected_at
     subset["_date"] = pd.to_datetime(
         subset["pub_date"] if "pub_date" in subset.columns else subset["collected_at"],
         errors="coerce"
