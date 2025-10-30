@@ -33,9 +33,11 @@ COL_CANDIDATES = {
     "keyword": ["keyword", "키워드"],
     "title": ["title", "subject", "headline", "제목"],
     "url": ["url", "link", "기사링크", "news_url", "원문링크"],
-    "pub_date": ["pub_date", "date", "published_at", "publish_date", "발행일", "작성일"],
+    "pub_date": ["pub_date", "date", "published_at", "publish_date", "발행일", "작성일", "발행일(KST)"],
     "press": ["press", "source", "publisher", "언론사", "매체", "출처"],
-    "collected_at": ["collected_at", "staged_at", "crawled_at", "수집일", "수집일자", "수집시각"],
+    "collected_at": ["collected_at", "staged_at", "crawled_at", "수집일", "수집일자", "수집시각", "수집시각(KST)"],
+}
+
 }
 
 
