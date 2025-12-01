@@ -2,7 +2,8 @@ name: Daily News CSV
 
 on:
   schedule:
-    - cron: "0 23 * * *"   # 매일 08:00 KST (UTC 23시)
+    # 매일 한국 시간 오전 08:30 실행 (UTC 23:30)
+    - cron: "30 23 * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -12,25 +13,21 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1) 레포 체크아웃
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2) Python 환경 세팅
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
-      # 3) 의존성 설치 (requirements.txt에 newspaper3k, google-generativeai 포함 필수)
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 4) 뉴스 크롤링 실행
-      - name: Run news crawler & AI Summarizer
+      - name: Run news crawler
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
@@ -38,16 +35,10 @@ jobs:
           EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
         run: python web_news.py
 
-      # 5) 결과물 커밋/푸시
-      # web_news.py가 스스로 기존 데이터를 읽고 합쳐서 저장하므로 별도 파이프라인 스크립트 불필요
       - name: Commit and push updates
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          
-          # data 폴더 내의 모든 변경된 CSV 파일(ALL.csv, NEW_latest.csv 등)을 스테이징
           git add data/*.csv
-          
-          # 커밋 메시지 작성 및 푸시 (변경사항 없을 시 에러 방지)
-          git commit -m "auto: daily update with AI summaries $(date -u +'%Y-%m-%dT%H:%MZ')" || echo "No changes to commit"
+          git commit -m "auto: daily news update $(date -u +'%Y-%m-%dT%H:%MZ')" || echo "No changes"
           git push
