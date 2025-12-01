@@ -2,7 +2,6 @@ name: Daily News CSV
 
 on:
   schedule:
-    # 매일 한국 시간 오전 08:30 실행 (UTC 23:30)
     - cron: "30 23 * * *"
   workflow_dispatch: {}
 
@@ -13,26 +12,23 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1) 저장소 코드 내려받기
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2) 파이썬 3.11 설치
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
+          # cache: "pip"  <-- ★ 이 줄을 삭제했습니다! (캐시 안 씀)
 
-      # 3) 라이브러리 설치 (★ 핵심: AI 라이브러리 강제 업데이트)
-      - name: Install dependencies
+      - name: Install dependencies (Clean Install)
         run: |
           python -m pip install --upgrade pip
-          # 기존 캐시 무시하고 AI 라이브러리를 최신으로 강제 설치
-          pip install --upgrade google-generativeai
-          pip install -r requirements.txt
+          # ★ 강제로 삭제 후 재설치 옵션(--force-reinstall) 추가
+          pip install --force-reinstall -r requirements.txt
+          # ★ 설치된 버전 확인 (로그에 찍힘)
+          pip show google-generativeai
 
-      # 4) 뉴스 수집 실행
       - name: Run news crawler
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -43,7 +39,6 @@ jobs:
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
         run: python web_news.py
 
-      # 5) 결과물 커밋/푸시 (파일이 없으면 에러 내지 않고 건너뜀)
       - name: Commit and push updates
         run: |
           git config user.name "github-actions[bot]"
@@ -54,5 +49,5 @@ jobs:
             git commit -m "auto: daily news update $(date -u +'%Y-%m-%dT%H:%MZ')" || echo "No changes to commit"
             git push
           else
-            echo "⚠️ 저장할 데이터 파일이 없습니다. (크롤링 결과 없음)"
+            echo "⚠️ 저장할 데이터 파일이 없습니다."
           fi
