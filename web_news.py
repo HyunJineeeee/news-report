@@ -14,16 +14,19 @@ import trafilatura
 import difflib
 import urllib3
 
+# SSL 경고 무시 (외부 언론사 접속 시 필수)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ============== 설정 ==============
 KEYWORDS = ["일학습병행", "직업훈련", "고용노동부", "한국산업인력공단"]
 DATA_DIR = Path("data")
-SIMILARITY_THRESHOLD = 0.4
+SIMILARITY_THRESHOLD = 0.5 
 
 KEYWORD_COLORS = {
-    "일학습병행": "#3498db", "직업훈련": "#e67e22",
-    "고용노동부": "#7f8c8d", "한국산업인력공단": "#2c3e50"
+    "일학습병행": "#3498db",      # 파랑
+    "직업훈련": "#e67e22",        # 주황
+    "고용노동부": "#7f8c8d",      # 회색
+    "한국산업인력공단": "#2c3e50" # 남색
 }
 
 # 환경변수 로드
@@ -51,75 +54,68 @@ def is_similar(text1, text2):
     if not text1 or not text2: return False
     return difflib.SequenceMatcher(None, text1, text2).ratio() >= SIMILARITY_THRESHOLD
 
-# ============== AI 기능 (핵심 수정: 안전 필터 해제) ==============
-def generate_content_safe(prompt):
-    if not GEMINI_API_KEY: return ""
-    
-    # ★ 안전 설정: 뉴스 내용이 차단되지 않도록 필터링 수준을 낮춤
-    safety_settings = [
-        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-    ]
-    
-    # ★ 모델 변경: 가장 안정적인 'gemini-pro' 사용
+# ============== AI 기능 (디버깅 포함) ==============
+def summarize_article(text: str) -> str:
+    if not GEMINI_API_KEY or not text: return ""
     try:
-        model = genai.GenerativeModel('gemini-pro') 
-        response = model.generate_content(prompt, safety_settings=safety_settings)
-        
-        # 응답이 정상적인지 확인
-        if response.text:
-            return response.text.strip()
-        else:
-            print("⚠️ [AI 응답 없음] 빈 결과 반환")
-            return ""
-            
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        prompt = (
+            "너는 뉴스 리포트 봇이야. 아래 기사 본문을 읽고 핵심 내용을 2~3줄로 요약해.\n"
+            "형식: '- '로 시작하는 개조식 문장.\n"
+            "조건: 감정을 배제하고 건조한 보고서체 사용.\n\n"
+            f"기사 본문:\n{text[:4000]}"
+        )
+        response = model.generate_content(prompt)
+        return response.text.strip()
     except Exception as e:
-        # 에러 발생 시 로그에 상세 출력
-        print(f"❌ [AI 생성 실패] 원인: {e}")
+        print(f"⚠️ [AI 요약 에러] {e}")
         return ""
 
-def summarize_article(text: str) -> str:
-    prompt = (
-        "너는 뉴스 리포트 봇이야. 아래 기사 본문을 읽고 핵심 내용을 2~3줄로 요약해.\n"
-        "형식: '- '로 시작하는 개조식 문장.\n"
-        "조건: 감정을 배제하고 건조한 보고서체 사용.\n"
-        "주의: 서론 없이 바로 요약 내용만 출력.\n\n"
-        f"기사 본문:\n{text[:3500]}" # 토큰 제한 고려하여 길이 조정
-    )
-    result = generate_content_safe(prompt)
-    if result: return result
-    return f"- (AI 요약 실패) 원문 확인 필요"
-
 def repair_snippet(snippet: str) -> str:
-    prompt = (
-        "너는 문장 교정 전문가야. 아래 텍스트는 기사 요약의 일부인데 문장이 잘려 있어.\n"
-        "내용을 추론하여 **완전한 하나의 요약 문장**으로 다듬어줘.\n"
-        "형식: '- '로 시작.\n\n"
-        f"입력 텍스트:\n{snippet}"
-    )
-    result = generate_content_safe(prompt)
-    # AI가 성공했으면 그 결과 반환, 실패했으면 원본(네이버 요약)이라도 보여줌
-    if result: return result
-    return f"- {snippet}"
+    if not GEMINI_API_KEY or not snippet: return ""
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        prompt = (
+            "너는 문장 교정 전문가야. 아래 텍스트는 뉴스 기사의 일부(미리보기)라서 문장이 중간에 끊겨 있어.\n"
+            "이 내용을 바탕으로 **자연스럽고 완전한 하나의 요약 문장**으로 다시 써줘.\n"
+            "조건 1: 문장이 '...'으로 끝나지 않게 할 것.\n"
+            "조건 2: '- '로 시작할 것.\n"
+            "조건 3: 내용을 추측하지 말고 있는 정보만으로 문장을 매끄럽게 맺을 것.\n\n"
+            f"입력 텍스트:\n{snippet}"
+        )
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        print(f"⚠️ [AI 복원 에러] {e}")
+        return snippet
 
-# ============== 본문 추출 (네이버 전용) ==============
+# ============== 본문 추출 (외부 사이트 호환 강화) ==============
 def extract_article_content(url: str) -> str:
     if not url: return ""
+    
+    # 일반적인 브라우저 헤더 (네이버 전용 아님)
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': 'https://news.naver.com/'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
     }
+
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
+        # 1. Trafilatura 시도
+        downloaded = trafilatura.fetch_url(url)
+        if downloaded:
+            text = trafilatura.extract(downloaded, include_comments=False, include_tables=False)
+            if text and len(text) >= 50: return text
+
+        # 2. Requests 재시도 (SSL 무시, 타임아웃 15초)
+        resp = requests.get(url, headers=headers, timeout=15, verify=False)
+        resp.encoding = resp.apparent_encoding 
         if resp.status_code == 200:
-            text = trafilatura.extract(resp.text, include_comments=False, include_tables=False)
+            text = trafilatura.extract(resp.text, include_comments=False)
             if text and len(text) >= 50: return text
         return ""
     except: return ""
 
-# ============== 네이버 뉴스 검색 API ==============
+# ============== 네이버 뉴스 검색 API (모든 링크 허용) ==============
 def crawl_naver_news(keyword, target_date_str):
     if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
         print("[ERROR] 네이버 API 키 누락")
@@ -152,8 +148,20 @@ def crawl_naver_news(keyword, target_date_str):
 
         if pub_date_day != target_date_str: continue
             
+        # ★★★ 복구된 로직: 모든 링크 허용 ★★★
+        # 네이버 뉴스 링크가 있으면 그걸 우선 쓰고, 없으면 원문 링크 사용
         raw_link = item['link']
-        if "news.naver.com" not in raw_link: continue 
+        original_link = item['originallink']
+        
+        target_url = ""
+        if "news.naver.com" in raw_link:
+            target_url = raw_link 
+        elif original_link:
+            target_url = original_link
+        else:
+            target_url = raw_link
+
+        if not target_url: continue
 
         title = clean_html(item['title'])
         desc = clean_html(item['description'])
@@ -161,8 +169,8 @@ def crawl_naver_news(keyword, target_date_str):
         rows.append({
             "키워드": keyword,
             "제목": title,
-            "원문링크": raw_link,
-            "출처": "NaverNews",
+            "원문링크": target_url,
+            "출처": "NaverAPI",
             "발행일(KST)": pub_date_str,
             "수집시각(KST)": collected_at,
             "요약": "",
@@ -208,8 +216,8 @@ def send_email_report(df_new, target_date_str):
                 summary = row['요약']
                 summary_html = summary.replace('\n', '<br>')
                 
-                # 실패 문구가 보이면 회색, 아니면 키워드 색상
-                border_color = kw_color if summary and "실패" not in summary else "#ddd"
+                # 요약 성공 여부 (본문 성공 or 복원 성공 시 색상 테두리)
+                border_color = kw_color if summary else "#ddd"
                 
                 html_body += f"""
                 <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 15px; background-color: #fff;">
@@ -285,7 +293,9 @@ def main():
         print(f"📅 {target_date_str} 날짜에 해당하는 기사가 없습니다.")
         return
 
+    # 중복 제거 (유사도 50%)
     unique_rows = []
+    print("🧹 중복 제거(유사도 50%) 수행 중...")
     for row in raw_rows:
         new_title_norm = row["_title_norm"]
         is_duplicate = False
@@ -311,23 +321,25 @@ def main():
         keyword = row["키워드"]
         api_desc = row["_api_desc"]
         
+        # 1. 본문 추출 시도
         content = extract_article_content(target_url)
         summary = ""
         
         if content:
+            # 본문 필터링
             if keyword not in content and keyword not in row['제목']:
                 print(f"   ❌ [제외] 본문에 '{keyword}' 없음")
                 continue 
             summary = summarize_article(content)
             time.sleep(2)
         
+        # 2. 본문 실패 시 -> 문장 복원 (Fallback)
         if not summary or "부족합니다" in summary:
-            # 실패 시 복원 (안전 설정 해제됨)
-            restored = repair_snippet(api_desc)
-            if restored == api_desc: 
-                summary = f"{api_desc} (AI 작동 실패)"
+            # 외부 링크가 봇 차단해서 실패했다면 여기서 살려냄
+            if api_desc:
+                summary = repair_snippet(api_desc)
             else:
-                summary = restored
+                summary = "- 요약할 내용을 가져올 수 없습니다. 원문을 확인해주세요."
             
         row["요약"] = summary
         processed_rows.append(row)
