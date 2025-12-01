@@ -51,16 +51,17 @@ def is_similar(text1, text2):
     if not text1 or not text2: return False
     return difflib.SequenceMatcher(None, text1, text2).ratio() >= SIMILARITY_THRESHOLD
 
-# ============== AI 기능 (Gemini 1.5 Flash 복귀) ==============
+# ============== AI 기능 (모델: gemini-1.5-flash) ==============
 def summarize_article(text: str) -> str:
     if not GEMINI_API_KEY: return ""
     try:
-        # ★ 라이브러리 업데이트 후 1.5-flash 사용 (가장 빠름)
+        # 라이브러리가 업데이트되면 이 모델이 100% 작동합니다.
         model = genai.GenerativeModel('gemini-1.5-flash')
         prompt = (
             "너는 뉴스 리포트 봇이야. 아래 기사 본문을 읽고 핵심 내용을 2~3줄로 요약해.\n"
             "형식: '- '로 시작하는 개조식 문장.\n"
-            "조건: 감정을 배제하고 건조한 보고서체 사용.\n\n"
+            "조건: 감정을 배제하고 건조한 보고서체 사용.\n"
+            "주의: 서론 없이 바로 요약 내용만 출력.\n\n"
             f"기사 본문:\n{text[:4000]}"
         )
         response = model.generate_content(prompt)
@@ -72,7 +73,6 @@ def summarize_article(text: str) -> str:
 def repair_snippet(snippet: str) -> str:
     if not GEMINI_API_KEY: return snippet
     try:
-        # ★ 라이브러리 업데이트 후 1.5-flash 사용
         model = genai.GenerativeModel('gemini-1.5-flash')
         prompt = (
             "너는 문장 교정 전문가야. 아래 텍스트는 기사 요약의 일부인데 문장이 잘려 있어.\n"
@@ -86,7 +86,7 @@ def repair_snippet(snippet: str) -> str:
         print(f"⚠️ [AI 복원 에러] {e}")
         return snippet
 
-# ============== 본문 추출 ==============
+# ============== 본문 추출 (네이버 전용) ==============
 def extract_article_content(url: str) -> str:
     if not url: return ""
     headers = {
@@ -303,9 +303,8 @@ def main():
             time.sleep(2)
         
         if not summary or "부족합니다" in summary:
-            # 실패 시 복원 (이제 모델 버전이 맞아서 성공할 것임)
             restored = repair_snippet(api_desc)
-            if restored == api_desc:
+            if restored == api_desc: 
                 summary = f"{api_desc} (AI 작동 실패)"
             else:
                 summary = restored
