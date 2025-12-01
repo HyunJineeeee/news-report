@@ -23,29 +23,29 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      # 3) 의존성 설치
+      # 3) 의존성 설치 (requirements.txt에 newspaper3k, google-generativeai 포함 필수)
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 4) 뉴스 크롤링 실행
-      - name: Run news crawler
+      # 4) 뉴스 크롤링 및 AI 요약 실행 (핵심 변경 구간)
+      - name: Run news crawler & AI Summarizer
+        env:
+          # Settings > Secrets에 등록한 키를 환경변수로 주입
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python web_news.py
 
-      # 5) 데이터 파이프라인 실행 (append-only, dedupe)
-      - name: Run news pipeline
-        run: |
-          python tools/news_pipeline.py \
-            --new-batch "data/*.csv" \
-            --raw "data/news_raw.csv" \
-            --master "data/news_master.csv"
-
-      # 6) 결과물 커밋/푸시
+      # 5) 결과물 커밋/푸시
+      # web_news.py가 스스로 기존 데이터를 읽고 합쳐서 저장하므로 별도 파이프라인 스크립트 불필요
       - name: Commit and push updates
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/news_raw.csv data/news_master.csv || true
-          git commit -m "auto: daily update $(date -u +'%Y-%m-%dT%H:%MZ')" || echo "No changes"
-          git push || true
+          
+          # data 폴더 내의 모든 변경된 CSV 파일(ALL.csv, NEW_latest.csv 등)을 스테이징
+          git add data/*.csv
+          
+          # 커밋 메시지 작성 및 푸시 (변경사항 없을 시 에러 방지)
+          git commit -m "auto: daily update with AI summaries $(date -u +'%Y-%m-%dT%H:%MZ')" || echo "No changes to commit"
+          git push
