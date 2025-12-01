@@ -184,7 +184,7 @@ def send_email_report(df_new, target_date_str):
     if not EMAIL_USER or not EMAIL_PASSWORD or not EMAIL_RECEIVER: return
     if df_new.empty: return
 
-    subject = f"[일병리포트] {target_date_str} 주요 뉴스 알림"
+    subject = f"[뉴스 리포트] {target_date_str} 주요 뉴스 알림"
 
     html_body = f"""
     <div style="font-family: 'Malgun Gothic', sans-serif; background-color: #f4f4f4; padding: 20px; color: #333;">
