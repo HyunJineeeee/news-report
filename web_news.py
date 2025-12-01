@@ -26,7 +26,7 @@ KEYWORD_COLORS = {
     "고용노동부": "#7f8c8d", "한국산업인력공단": "#2c3e50"
 }
 
-# 환경변수
+# 환경변수 로드
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 EMAIL_USER = os.environ.get("EMAIL_USER")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
@@ -51,28 +51,34 @@ def is_similar(text1, text2):
     if not text1 or not text2: return False
     return difflib.SequenceMatcher(None, text1, text2).ratio() >= SIMILARITY_THRESHOLD
 
-# ============== AI 기능 (3중 안전장치) ==============
-def try_generate_content(prompt):
-    """
-    모델을 순차적으로 시도하여 어떻게든 결과를 만들어내는 함수
-    1순위: gemini-1.5-flash (최신/빠름)
-    2순위: gemini-pro (구형/안정적)
-    3순위: 실패 시 None 반환
-    """
-    if not GEMINI_API_KEY: return None
-
-    models_to_try = ['gemini-1.5-flash', 'gemini-pro']
+# ============== AI 기능 (핵심 수정: 안전 필터 해제) ==============
+def generate_content_safe(prompt):
+    if not GEMINI_API_KEY: return ""
     
-    for model_name in models_to_try:
-        try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            if response.text:
-                return response.text.strip()
-        except Exception:
-            continue # 다음 모델 시도
+    # ★ 안전 설정: 뉴스 내용이 차단되지 않도록 필터링 수준을 낮춤
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]
+    
+    # ★ 모델 변경: 가장 안정적인 'gemini-pro' 사용
+    try:
+        model = genai.GenerativeModel('gemini-pro') 
+        response = model.generate_content(prompt, safety_settings=safety_settings)
+        
+        # 응답이 정상적인지 확인
+        if response.text:
+            return response.text.strip()
+        else:
+            print("⚠️ [AI 응답 없음] 빈 결과 반환")
+            return ""
             
-    return None # 모든 모델 실패
+    except Exception as e:
+        # 에러 발생 시 로그에 상세 출력
+        print(f"❌ [AI 생성 실패] 원인: {e}")
+        return ""
 
 def summarize_article(text: str) -> str:
     prompt = (
@@ -80,13 +86,11 @@ def summarize_article(text: str) -> str:
         "형식: '- '로 시작하는 개조식 문장.\n"
         "조건: 감정을 배제하고 건조한 보고서체 사용.\n"
         "주의: 서론 없이 바로 요약 내용만 출력.\n\n"
-        f"기사 본문:\n{text[:4000]}"
+        f"기사 본문:\n{text[:3500]}" # 토큰 제한 고려하여 길이 조정
     )
-    result = try_generate_content(prompt)
+    result = generate_content_safe(prompt)
     if result: return result
-    
-    # AI가 다 죽었을 경우: 그냥 앞부분이라도 잘라서 반환
-    return f"- (AI 요약 실패) {text[:100]}..."
+    return f"- (AI 요약 실패) 원문 확인 필요"
 
 def repair_snippet(snippet: str) -> str:
     prompt = (
@@ -95,10 +99,9 @@ def repair_snippet(snippet: str) -> str:
         "형식: '- '로 시작.\n\n"
         f"입력 텍스트:\n{snippet}"
     )
-    result = try_generate_content(prompt)
+    result = generate_content_safe(prompt)
+    # AI가 성공했으면 그 결과 반환, 실패했으면 원본(네이버 요약)이라도 보여줌
     if result: return result
-    
-    # AI가 다 죽었을 경우: 원본 반환
     return f"- {snippet}"
 
 # ============== 본문 추출 (네이버 전용) ==============
@@ -116,7 +119,7 @@ def extract_article_content(url: str) -> str:
         return ""
     except: return ""
 
-# ============== 네이버 뉴스 검색 ==============
+# ============== 네이버 뉴스 검색 API ==============
 def crawl_naver_news(keyword, target_date_str):
     if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
         print("[ERROR] 네이버 API 키 누락")
@@ -205,6 +208,7 @@ def send_email_report(df_new, target_date_str):
                 summary = row['요약']
                 summary_html = summary.replace('\n', '<br>')
                 
+                # 실패 문구가 보이면 회색, 아니면 키워드 색상
                 border_color = kw_color if summary and "실패" not in summary else "#ddd"
                 
                 html_body += f"""
@@ -318,7 +322,12 @@ def main():
             time.sleep(2)
         
         if not summary or "부족합니다" in summary:
-            summary = repair_snippet(api_desc)
+            # 실패 시 복원 (안전 설정 해제됨)
+            restored = repair_snippet(api_desc)
+            if restored == api_desc: 
+                summary = f"{api_desc} (AI 작동 실패)"
+            else:
+                summary = restored
             
         row["요약"] = summary
         processed_rows.append(row)
