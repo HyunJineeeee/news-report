@@ -26,7 +26,7 @@ KEYWORD_COLORS = {
     "고용노동부": "#7f8c8d", "한국산업인력공단": "#2c3e50"
 }
 
-# 환경변수 로드
+# 환경변수
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 EMAIL_USER = os.environ.get("EMAIL_USER")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
@@ -51,40 +51,55 @@ def is_similar(text1, text2):
     if not text1 or not text2: return False
     return difflib.SequenceMatcher(None, text1, text2).ratio() >= SIMILARITY_THRESHOLD
 
-# ============== AI 기능 (모델: gemini-1.5-flash) ==============
+# ============== AI 기능 (3중 안전장치) ==============
+def try_generate_content(prompt):
+    """
+    모델을 순차적으로 시도하여 어떻게든 결과를 만들어내는 함수
+    1순위: gemini-1.5-flash (최신/빠름)
+    2순위: gemini-pro (구형/안정적)
+    3순위: 실패 시 None 반환
+    """
+    if not GEMINI_API_KEY: return None
+
+    models_to_try = ['gemini-1.5-flash', 'gemini-pro']
+    
+    for model_name in models_to_try:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            if response.text:
+                return response.text.strip()
+        except Exception:
+            continue # 다음 모델 시도
+            
+    return None # 모든 모델 실패
+
 def summarize_article(text: str) -> str:
-    if not GEMINI_API_KEY: return ""
-    try:
-        # 라이브러리가 업데이트되면 이 모델이 100% 작동합니다.
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        prompt = (
-            "너는 뉴스 리포트 봇이야. 아래 기사 본문을 읽고 핵심 내용을 2~3줄로 요약해.\n"
-            "형식: '- '로 시작하는 개조식 문장.\n"
-            "조건: 감정을 배제하고 건조한 보고서체 사용.\n"
-            "주의: 서론 없이 바로 요약 내용만 출력.\n\n"
-            f"기사 본문:\n{text[:4000]}"
-        )
-        response = model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        print(f"⚠️ [AI 요약 에러] {e}")
-        return ""
+    prompt = (
+        "너는 뉴스 리포트 봇이야. 아래 기사 본문을 읽고 핵심 내용을 2~3줄로 요약해.\n"
+        "형식: '- '로 시작하는 개조식 문장.\n"
+        "조건: 감정을 배제하고 건조한 보고서체 사용.\n"
+        "주의: 서론 없이 바로 요약 내용만 출력.\n\n"
+        f"기사 본문:\n{text[:4000]}"
+    )
+    result = try_generate_content(prompt)
+    if result: return result
+    
+    # AI가 다 죽었을 경우: 그냥 앞부분이라도 잘라서 반환
+    return f"- (AI 요약 실패) {text[:100]}..."
 
 def repair_snippet(snippet: str) -> str:
-    if not GEMINI_API_KEY: return snippet
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        prompt = (
-            "너는 문장 교정 전문가야. 아래 텍스트는 기사 요약의 일부인데 문장이 잘려 있어.\n"
-            "내용을 추론하여 **완전한 하나의 요약 문장**으로 다듬어줘.\n"
-            "형식: '- '로 시작.\n\n"
-            f"입력 텍스트:\n{snippet}"
-        )
-        response = model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        print(f"⚠️ [AI 복원 에러] {e}")
-        return snippet
+    prompt = (
+        "너는 문장 교정 전문가야. 아래 텍스트는 기사 요약의 일부인데 문장이 잘려 있어.\n"
+        "내용을 추론하여 **완전한 하나의 요약 문장**으로 다듬어줘.\n"
+        "형식: '- '로 시작.\n\n"
+        f"입력 텍스트:\n{snippet}"
+    )
+    result = try_generate_content(prompt)
+    if result: return result
+    
+    # AI가 다 죽었을 경우: 원본 반환
+    return f"- {snippet}"
 
 # ============== 본문 추출 (네이버 전용) ==============
 def extract_article_content(url: str) -> str:
@@ -101,7 +116,7 @@ def extract_article_content(url: str) -> str:
         return ""
     except: return ""
 
-# ============== 네이버 뉴스 검색 API ==============
+# ============== 네이버 뉴스 검색 ==============
 def crawl_naver_news(keyword, target_date_str):
     if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
         print("[ERROR] 네이버 API 키 누락")
@@ -190,7 +205,7 @@ def send_email_report(df_new, target_date_str):
                 summary = row['요약']
                 summary_html = summary.replace('\n', '<br>')
                 
-                border_color = kw_color if summary and "작동 실패" not in summary else "#ddd"
+                border_color = kw_color if summary and "실패" not in summary else "#ddd"
                 
                 html_body += f"""
                 <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 15px; background-color: #fff;">
@@ -303,11 +318,7 @@ def main():
             time.sleep(2)
         
         if not summary or "부족합니다" in summary:
-            restored = repair_snippet(api_desc)
-            if restored == api_desc: 
-                summary = f"{api_desc} (AI 작동 실패)"
-            else:
-                summary = restored
+            summary = repair_snippet(api_desc)
             
         row["요약"] = summary
         processed_rows.append(row)
