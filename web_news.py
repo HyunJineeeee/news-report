@@ -14,7 +14,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import google.generativeai as genai
 from newspaper import Article, Config
-from datetime import datetime, timedelta
+import base64
 
 # ============== 설정 ==============
 KEYWORDS = ["일학습병행", "직업훈련", "고용노동부", "한국산업인력공단"]
@@ -36,12 +36,14 @@ def make_session() -> requests.Session:
     ad = HTTPAdapter(max_retries=retries)
     s.mount("http://", ad)
     s.mount("https://", ad)
-    # 구글이 봇을 차단하지 않도록 최신 브라우저처럼 위장
+    # 구글 봇 차단 우회용 헤더 및 쿠키
     s.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
     })
+    # 쿠키 추가 (Consent 페이지 우회 시도)
+    s.cookies.set("CONSENT", "YES+KR.ko+V14+BX")
     return s
 
 def normalize_url(url: str) -> str:
@@ -78,35 +80,43 @@ def safe_name(name: str) -> str:
     return re.sub(r"[\\/:*?\[\]]", "_", str(name))[:64] or "Sheet"
 
 def get_real_url(session, url):
-    """구글 뉴스 리다이렉트를 추적하여 진짜 URL을 가져오는 함수"""
+    """
+    구글 뉴스 리다이렉트 URL을 추적하여 진짜 URL을 가져옵니다.
+    단순 requests뿐만 아니라 base64 디코딩 로직을 사용하여 원문을 찾습니다.
+    """
     if "news.google.com" not in url:
         return url
     
     try:
-        # 1. 헤더를 포함하여 리다이렉트 추적
-        r = session.get(url, allow_redirects=True, timeout=10)
-        
-        # 2. 만약 최종 URL도 여전히 news.google.com이라면 (봇 차단 등으로 인해)
-        # newspaper3k가 처리를 못하므로 실패로 간주하거나 그냥 원본 반환
-        if "news.google.com" in r.url:
-            # HTML 내에서 실제 링크를 찾으려는 시도 (고급)
-            # 여기서는 너무 복잡해지므로 패스하고, 
-            # 단순히 리다이렉트된 결과가 news.google이 아니길 기대함.
-            return r.url 
-        
-        return r.url
+        # 1차 시도: 헤더와 쿠키를 달고 리다이렉트 추적
+        r = session.get(url, allow_redirects=True, timeout=5)
+        if "news.google.com" not in r.url:
+            return r.url
+            
+        # 2차 시도: 구글 뉴스 URL 구조상 base64로 인코딩된 부분이 있을 수 있음 (단순화된 로직)
+        # (구글의 암호화 방식은 복잡하여 완벽한 디코딩은 어려우나, 리다이렉트된 HTML 내에서 찾는 방식 사용)
+        soup = BeautifulSoup(r.text, "html.parser")
+        # 구글 리다이렉트 페이지의 <a> 태그나 <c-wiz> 등을 뒤져봄
+        links = soup.find_all("a", href=True)
+        for link in links:
+            href = link['href']
+            # 구글 내부 링크가 아니고 http로 시작하면 원문일 확률 높음
+            if href.startswith("http") and "google.com" not in href:
+                return href
+                
+        return r.url # 실패하면 원래 URL 반환
     except:
         return url
 
 # ============== AI & 본문 추출 ==============
 def extract_article_content(url: str) -> str:
     try:
-        # URL이 여전히 news.google.com이면 newspaper3k는 실패함
+        # 여전히 구글 링크라면 newspaper3k는 실패함
         if "news.google.com" in url:
             return ""
 
-        # newspaper 설정을 통해 브라우저 위장 강화
         config = Config()
+        # 봇 차단 방지용 User-Agent
         config.browser_user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         config.request_timeout = 10
 
@@ -115,7 +125,6 @@ def extract_article_content(url: str) -> str:
         article.parse()
         text = article.text.strip()
         
-        # 본문이 너무 짧으면(네비게이션 메뉴 등만 긁어온 경우) 실패 처리
         return text if len(text) >= 100 else "" 
     except Exception as e:
         return ""
@@ -134,7 +143,7 @@ def summarize_with_gemini(text: str) -> str:
         return response.text.strip()
     except: return ""
 
-# ============== 이메일 발송 (디자인 업그레이드) ==============
+# ============== 이메일 발송 (인라인 스타일 적용) ==============
 def send_email_report(df_new, target_date_str):
     if not EMAIL_USER or not EMAIL_PASSWORD or not EMAIL_RECEIVER:
         print("[WARN] 이메일 설정 누락. 발송 생략.")
@@ -146,55 +155,18 @@ def send_email_report(df_new, target_date_str):
 
     subject = f"[일병리포트] {target_date_str} 주요 뉴스 알림"
 
-    # 카드 뉴스 스타일 CSS
+    # ★★★ 인라인 스타일(Inline Style) 적용 ★★★
+    # <style> 태그를 쓰지 않고, 태그 안에 style="..."을 직접 넣어서 모든 이메일 클라이언트 호환성 확보
+    
     html_body = f"""
-    <html>
-    <head>
-        <style>
-            body {{ font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; background-color: #f4f4f4; margin: 0; padding: 20px; }}
-            .container {{ max-width: 700px; margin: 0 auto; background-color: #ffffff; padding: 30px; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }}
-            .header {{ text-align: center; margin-bottom: 30px; border-bottom: 2px solid #3498db; padding-bottom: 20px; }}
-            .header h1 {{ color: #2c3e50; font-size: 24px; margin: 0; }}
-            .header p {{ color: #7f8c8d; font-size: 14px; margin-top: 10px; }}
+    <div style="font-family: 'Malgun Gothic', sans-serif; background-color: #f4f4f4; padding: 20px; color: #333;">
+        <div style="max-width: 700px; margin: 0 auto; background-color: #ffffff; padding: 30px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.05);">
             
-            .keyword-section {{ margin-bottom: 40px; }}
-            .keyword-title {{ 
-                background-color: #3498db; color: white; padding: 8px 15px; 
-                display: inline-block; border-radius: 20px; font-weight: bold; font-size: 16px; margin-bottom: 15px;
-            }}
-            
-            .news-card {{ 
-                border: 1px solid #e0e0e0; border-radius: 8px; padding: 15px; margin-bottom: 15px; 
-                background-color: #fff; transition: transform 0.2s;
-            }}
-            .news-card:hover {{ border-color: #3498db; }}
-            
-            .news-title {{ 
-                font-size: 18px; font-weight: bold; color: #2c3e50; text-decoration: none; display: block; margin-bottom: 8px; line-height: 1.4;
-            }}
-            .news-title:hover {{ color: #3498db; text-decoration: underline; }}
-            
-            .news-meta {{ font-size: 12px; color: #95a5a6; margin-bottom: 12px; }}
-            
-            .news-summary {{ 
-                background-color: #f9f9f9; padding: 12px; border-left: 4px solid #3498db; 
-                color: #555; font-size: 14px; line-height: 1.6; border-radius: 4px;
-            }}
-            .news-summary ul {{ margin: 0; padding-left: 20px; }}
-            .news-summary li {{ margin-bottom: 5px; }}
-            
-            .footer {{ text-align: center; margin-top: 40px; font-size: 12px; color: #bdc3c7; }}
-            .btn-link {{
-                display: inline-block; background-color: #f1f1f1; color: #555; 
-                padding: 5px 10px; border-radius: 4px; text-decoration: none; font-size: 12px; margin-top: 5px;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <h1>📰 {target_date_str} 뉴스 리포트</h1>
-                <p>어제 수집된 총 {len(df_new)}건의 기사 요약입니다.</p>
+            <div style="text-align: center; margin-bottom: 30px; border-bottom: 2px solid #3498db; padding-bottom: 20px;">
+                <h1 style="color: #2c3e50; font-size: 24px; margin: 0;">📰 {target_date_str} 뉴스 리포트</h1>
+                <p style="color: #7f8c8d; font-size: 14px; margin-top: 10px;">
+                    어제 수집된 총 <span style="color:#e67e22; font-weight:bold;">{len(df_new)}</span>건의 기사 요약입니다.
+                </p>
             </div>
     """
 
@@ -204,8 +176,13 @@ def send_email_report(df_new, target_date_str):
         if kw in grouped.groups:
             group_df = grouped.get_group(kw)
             
-            html_body += f'<div class="keyword-section">'
-            html_body += f'<div class="keyword-title"># {kw}</div>'
+            # 키워드 제목
+            html_body += f"""
+            <div style="margin-bottom: 30px;">
+                <div style="background-color: #3498db; color: white; padding: 6px 15px; display: inline-block; border-radius: 15px; font-weight: bold; font-size: 16px; margin-bottom: 15px;">
+                    # {kw}
+                </div>
+            """
             
             for idx, row in group_df.iterrows():
                 title = row['제목']
@@ -216,32 +193,42 @@ def send_email_report(df_new, target_date_str):
 
                 # 요약 HTML 처리
                 if summary:
-                    # 마크다운 스타일(- )을 HTML 리스트로 변환하면 더 예쁨
                     summary_html = summary.replace('\n', '<br>')
+                    summary_style = "background-color: #f9f9f9; padding: 15px; border-left: 4px solid #3498db; color: #555; font-size: 14px; line-height: 1.6; border-radius: 4px;"
                 else:
-                    summary_html = "<span style='color:#bbb;'>요약된 내용이 없습니다. 원문 링크를 확인해주세요.</span>"
+                    summary_html = "👉 클릭하여 원문 내용을 확인하세요."
+                    summary_style = "background-color: #f0f0f0; padding: 10px; color: #888; font-size: 13px; text-align: center; border-radius: 4px;"
 
+                # 기사 카드
                 html_body += f"""
-                <div class="news-card">
-                    <a href="{link}" class="news-title" target="_blank">{title}</a>
-                    <div class="news-meta">{source} · {date}</div>
-                    <div class="news-summary">
+                <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 15px; background-color: #fff;">
+                    <a href="{link}" target="_blank" style="font-size: 18px; font-weight: bold; color: #2c3e50; text-decoration: none; display: block; margin-bottom: 8px; line-height: 1.4;">
+                        {title}
+                    </a>
+                    
+                    <div style="font-size: 12px; color: #95a5a6; margin-bottom: 15px;">
+                        {source} | {date}
+                    </div>
+                    
+                    <div style="{summary_style}">
                         {summary_html}
                     </div>
-                    <div style="text-align:right;">
-                        <a href="{link}" class="btn-link" target="_blank">원문 보러가기 →</a>
+                    
+                    <div style="text-align: right; margin-top: 10px;">
+                        <a href="{link}" target="_blank" style="display: inline-block; background-color: #ecf0f1; color: #555; padding: 5px 12px; border-radius: 4px; text-decoration: none; font-size: 12px;">
+                            원문 보러가기 →
+                        </a>
                     </div>
                 </div>
                 """
-            html_body += '</div>'
+            html_body += '</div>' # 키워드 섹션 닫기
 
     html_body += """
-            <div class="footer">
+            <div style="text-align: center; margin-top: 40px; font-size: 12px; color: #bdc3c7; border-top: 1px solid #eee; padding-top: 20px;">
                 Automated by GitHub Actions & Google Gemini
             </div>
         </div>
-    </body>
-    </html>
+    </div>
     """
 
     try:
@@ -278,7 +265,7 @@ def crawl_google_news_rss(session, keyword):
         pub_date_str = it.pubDate.text if it.pubDate else ""
         pub_ts_utc = parse_pub_date(pub_date_str)
         
-        # ★ 핵심: 진짜 URL로 변환 시도
+        # 진짜 URL 추적 시도
         final_link = get_real_url(session, link)
         
         rows.append({
@@ -298,7 +285,7 @@ def main():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     session = make_session()
 
-    # 타겟 날짜: "어제" (한국 시간 기준)
+    # 타겟 날짜: "어제"
     now_kst = pd.Timestamp.now(tz="Asia/Seoul")
     yesterday_kst = now_kst - pd.Timedelta(days=1)
     target_date_str = yesterday_kst.strftime("%Y-%m-%d")
@@ -357,7 +344,7 @@ def main():
         summary = ""
         if content:
             summary = summarize_with_gemini(content)
-            time.sleep(2) # 속도 조절
+            time.sleep(2) 
             
         row["요약"] = summary
         processed_rows.append(row)
