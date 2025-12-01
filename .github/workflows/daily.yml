@@ -29,11 +29,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 4) 뉴스 크롤링 및 AI 요약 실행 (핵심 변경 구간)
+      # 4) 뉴스 크롤링 실행
       - name: Run news crawler & AI Summarizer
         env:
-          # Settings > Secrets에 등록한 키를 환경변수로 주입
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
         run: python web_news.py
 
       # 5) 결과물 커밋/푸시
