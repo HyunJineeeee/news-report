@@ -34,11 +34,7 @@ EMAIL_RECEIVER = os.environ.get("EMAIL_RECEIVER")
 NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID")
 NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET")
 
-# ★★★ [진단 1] 키 확인 로그 ★★★
-if not GEMINI_API_KEY:
-    print("❌ [치명적 오류] GEMINI_API_KEY가 없습니다! Settings > Secrets를 확인하세요.")
-else:
-    print(f"✅ API 키 감지됨 (앞자리: {GEMINI_API_KEY[:4]}***)")
+if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 # ============== 유틸 ==============
@@ -55,37 +51,40 @@ def is_similar(text1, text2):
     if not text1 or not text2: return False
     return difflib.SequenceMatcher(None, text1, text2).ratio() >= SIMILARITY_THRESHOLD
 
-# ============== AI 기능 (디버깅 강화) ==============
+# ============== AI 기능 (모델 변경: gemini-pro) ==============
 def summarize_article(text: str) -> str:
     if not GEMINI_API_KEY: return ""
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # ★ 모델 변경: gemini-1.5-flash -> gemini-pro
+        model = genai.GenerativeModel('gemini-pro')
         prompt = (
-            "너는 뉴스 리포트 봇이야. 아래 기사를 읽고 핵심을 2줄 이내로 요약해.\n"
-            "형식: '- '로 시작.\n"
-            "조건: 팩트 위주로 간결하게.\n\n"
-            f"기사:\n{text[:4000]}"
+            "너는 뉴스 리포트 봇이야. 아래 기사 본문을 읽고 핵심 내용을 2~3줄로 요약해.\n"
+            "형식: '- '로 시작하는 개조식 문장.\n"
+            "조건: 감정을 배제하고 건조한 보고서체 사용.\n"
+            "주의: 서론 없이 바로 요약 내용만 출력.\n\n"
+            f"기사 본문:\n{text[:4000]}"
         )
         response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
-        print(f"⚠️ [AI 요약 에러] {e}") # 로그에 에러 원인 출력
+        print(f"⚠️ [AI 요약 에러] {e}")
         return ""
 
 def repair_snippet(snippet: str) -> str:
     if not GEMINI_API_KEY: return snippet
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # ★ 모델 변경: gemini-1.5-flash -> gemini-pro
+        model = genai.GenerativeModel('gemini-pro')
         prompt = (
-            "너는 교정 전문가야. 이 문장은 기사 요약의 일부인데 중간에 끊겨 있어.\n"
-            "내용을 추론해서 '완전한 문장'으로 다듬어줘.\n"
+            "너는 문장 교정 전문가야. 아래 텍스트는 기사 요약의 일부인데 문장이 잘려 있어.\n"
+            "내용을 추론하여 **완전한 하나의 요약 문장**으로 다듬어줘.\n"
             "형식: '- '로 시작.\n\n"
-            f"입력:\n{snippet}"
+            f"입력 텍스트:\n{snippet}"
         )
         response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
-        print(f"⚠️ [AI 복원 에러] {e}") # 로그에 에러 원인 출력
+        print(f"⚠️ [AI 복원 에러] {e}")
         return snippet
 
 # ============== 본문 추출 (네이버 전용) ==============
@@ -136,7 +135,6 @@ def crawl_naver_news(keyword, target_date_str):
 
         if pub_date_day != target_date_str: continue
             
-        # 네이버 뉴스 링크만 수집 (안정성 확보)
         raw_link = item['link']
         if "news.naver.com" not in raw_link: continue 
 
@@ -295,23 +293,19 @@ def main():
         keyword = row["키워드"]
         api_desc = row["_api_desc"]
         
-        # 1. 본문 추출
         content = extract_article_content(target_url)
         summary = ""
         
         if content:
-            # 본문 필터링
             if keyword not in content and keyword not in row['제목']:
                 print(f"   ❌ [제외] 본문에 '{keyword}' 없음")
                 continue 
             summary = summarize_article(content)
             time.sleep(2)
         
-        # 2. 본문 실패 시 -> 문장 복원
         if not summary or "부족합니다" in summary:
-            # ★ 핵심: 복원 시도 후 실패하면 표시 남김
             restored = repair_snippet(api_desc)
-            if restored == api_desc: # 변화가 없으면 AI 실패한 것
+            if restored == api_desc: 
                 summary = f"{api_desc} (AI 작동 실패)"
             else:
                 summary = restored
