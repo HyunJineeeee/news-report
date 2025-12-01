@@ -11,16 +11,17 @@ from email.mime.multipart import MIMEMultipart
 import google.generativeai as genai
 from datetime import datetime, timedelta
 import trafilatura
-import difflib # ★ 텍스트 유사도 비교 라이브러리
+import difflib
+import urllib3
+
+# SSL 경고 무시
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ============== 설정 ==============
 KEYWORDS = ["일학습병행", "직업훈련", "고용노동부", "한국산업인력공단"]
 DATA_DIR = Path("data")
-
-# ★ 중복 제거 기준 (0.5 = 50% 이상 비슷하면 중복 처리)
 SIMILARITY_THRESHOLD = 0.5 
 
-# 키워드별 색상
 KEYWORD_COLORS = {
     "일학습병행": "#3498db",      # 파랑
     "직업훈련": "#e67e22",        # 주황
@@ -47,43 +48,49 @@ def clean_html(raw_html):
     return cleantext.replace("&quot;", "'").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
 
 def normalize_title(title):
-    """특수문자 제거 후 비교용 문자열 생성"""
     return re.sub(r'[^가-힣a-zA-Z0-9]', '', title)
 
 def is_similar(text1, text2):
-    """두 텍스트의 유사도가 설정값(50%) 이상인지 확인"""
     if not text1 or not text2: return False
-    # SequenceMatcher를 이용해 유사도(0.0 ~ 1.0) 계산
-    similarity = difflib.SequenceMatcher(None, text1, text2).ratio()
-    return similarity >= SIMILARITY_THRESHOLD
+    return difflib.SequenceMatcher(None, text1, text2).ratio() >= SIMILARITY_THRESHOLD
 
 # ============== AI & 본문 추출 ==============
 def extract_article_content(url: str) -> str:
     if not url: return ""
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Referer': 'https://www.naver.com/'
+    }
+
     try:
-        # 1. Trafilatura
+        # 1. Trafilatura 시도
         downloaded = trafilatura.fetch_url(url)
         if downloaded:
             text = trafilatura.extract(downloaded, include_comments=False, include_tables=False)
-            if text and len(text) >= 100: return text
-        
-        # 2. Requests (Fallback)
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-        resp = requests.get(url, headers=headers, timeout=5)
+            if text and len(text) >= 50: return text
+
+        # 2. Requests + Trafilatura 재시도
+        resp = requests.get(url, headers=headers, timeout=10, verify=False)
+        resp.encoding = resp.apparent_encoding 
         if resp.status_code == 200:
             text = trafilatura.extract(resp.text, include_comments=False)
-            if text and len(text) >= 100: return text
+            if text and len(text) >= 50: return text
+            
         return ""
-    except: return ""
+    except Exception:
+        return ""
 
 def summarize_with_gemini(text: str) -> str:
     if not GEMINI_API_KEY or not text: return ""
     try:
         model = genai.GenerativeModel('gemini-1.5-flash')
         prompt = (
-            "너는 뉴스 요약 전문가야. 아래 텍스트를 읽고 핵심 내용을 2~3줄로 요약해줘.\n"
+            "너는 뉴스 리포트 봇이야. 아래 텍스트를 읽고 내용을 1~2문장으로 요약해줘.\n"
             "형식: '- '로 시작하는 문장.\n"
-            "어조: 건조하고 객관적인 보고서체.\n\n"
+            "조건 1: '~함', '~임', '~것으로 보임' 등 간결한 보고서체 사용.\n"
+            "조건 2: 불필요한 서술어 제거.\n\n"
             f"텍스트:\n{text[:4000]}"
         )
         response = model.generate_content(prompt)
@@ -102,7 +109,6 @@ def crawl_naver_news(keyword, target_date_str):
         "X-Naver-Client-Secret": NAVER_CLIENT_SECRET
     }
     
-    # 넉넉하게 100개 가져와서 필터링
     params = {"query": keyword, "display": 100, "start": 1, "sort": "date"}
 
     try:
@@ -125,8 +131,16 @@ def crawl_naver_news(keyword, target_date_str):
 
         if pub_date_day != target_date_str: continue
             
-        final_link = item['originallink'] if item['originallink'] else item['link']
-        if not final_link: continue
+        raw_link = item['link']
+        original_link = item['originallink']
+        
+        target_url = ""
+        if "news.naver.com" in raw_link:
+            target_url = raw_link 
+        else:
+            target_url = original_link if original_link else raw_link
+
+        if not target_url: continue
 
         title = clean_html(item['title'])
         desc = clean_html(item['description'])
@@ -134,7 +148,7 @@ def crawl_naver_news(keyword, target_date_str):
         rows.append({
             "키워드": keyword,
             "제목": title,
-            "원문링크": final_link,
+            "원문링크": target_url,
             "출처": "NaverAPI",
             "발행일(KST)": pub_date_str,
             "수집시각(KST)": collected_at,
@@ -180,7 +194,9 @@ def send_email_report(df_new, target_date_str):
                 date = row['발행일(KST)']
                 summary = row['요약']
                 summary_html = summary.replace('\n', '<br>')
-                border_color = kw_color if "- " in summary else "#ddd"
+                
+                # 요약이 있으면 키워드 색상, 없으면(정말 실패시) 회색
+                border_color = kw_color if summary else "#ddd"
                 
                 html_body += f"""
                 <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 15px; background-color: #fff;">
@@ -241,7 +257,6 @@ def main():
         df_existing = pd.read_csv(all_path, dtype=str, encoding="utf-8-sig")
         for c in req_cols: 
             if c not in df_existing.columns: df_existing[c] = ""
-        # 기존 DB 제목들 (중복 방지용)
         existing_titles = list(df_existing["_title_norm"].dropna().astype(str))
     else:
         df_existing = pd.DataFrame(columns=req_cols)
@@ -258,31 +273,23 @@ def main():
         print(f"📅 {target_date_str} 날짜에 해당하는 기사가 없습니다.")
         return
 
-    # ★★★ 강력한 중복 제거 (유사도 50% 기준) ★★★
+    # 중복 제거 (유사도 50%)
     unique_rows = []
     print("🧹 중복 제거(유사도 50%) 수행 중...")
-    
     for row in raw_rows:
         new_title_norm = row["_title_norm"]
         is_duplicate = False
-        
-        # 1. 기존 DB와 비교
         for exist_title in existing_titles:
             if is_similar(new_title_norm, exist_title):
                 is_duplicate = True
                 break
-        
         if is_duplicate: continue
-
-        # 2. 이번 수집 목록 내 비교 (방금 추가한 것들과 비교)
         for accepted in unique_rows:
             if is_similar(new_title_norm, accepted["_title_norm"]):
                 is_duplicate = True
                 break
-        
         if not is_duplicate:
             unique_rows.append(row)
-            # (주의: 기존 DB 리스트에는 추가하지 않음 - 이번 루프 성능 위해)
 
     df_to_process = pd.DataFrame(unique_rows)
     print(f"🔎 {len(raw_rows)}건 중 중복 제거 후 {len(df_to_process)}건 처리 시작.")
@@ -290,11 +297,12 @@ def main():
     processed_rows = []
     for idx, row in df_to_process.iterrows():
         print(f"   Processing: {row['제목'][:20]}...")
-        real_url = row["원문링크"]
+        target_url = row["원문링크"]
         keyword = row["키워드"]
-        api_desc = row["_api_desc"]
+        api_desc = row["_api_desc"] # 네이버가 준 3줄 요약(raw text)
         
-        content = extract_article_content(real_url)
+        # 1. 본문 추출 시도
+        content = extract_article_content(target_url)
         summary = ""
         
         if content:
@@ -302,13 +310,18 @@ def main():
             if keyword not in content and keyword not in row['제목']:
                 print(f"   ❌ [제외] 본문에 '{keyword}' 없음")
                 continue 
-
+            
+            # 본문으로 AI 요약
             summary = summarize_with_gemini(content)
             time.sleep(2)
         
+        # 2. ★ 중요: 본문 실패 시 -> 네이버 설명글(api_desc)을 AI에게 다듬게 시킴
         if not summary or "부족합니다" in summary:
             if api_desc:
-                summary = f"- (본문 접속 불가로 요약 대체) {api_desc}..."
+                # "본문 접속 불가" 멘트 삭제하고, 그냥 설명을 요약해버림
+                summary = summarize_with_gemini(api_desc)
+                if not summary: # 혹시라도 AI가 실패하면 원본 사용
+                    summary = f"- {api_desc}"
             else:
                 summary = "- 요약할 내용을 가져올 수 없습니다. 원문을 확인해주세요."
             
@@ -322,10 +335,8 @@ def main():
         print("🧹 처리할 신규 기사가 없습니다.")
         df_new_processed = pd.DataFrame(columns=req_cols)
 
-    # 저장
     df_final_new = df_new_processed[req_cols] if not df_new_processed.empty else pd.DataFrame(columns=req_cols)
     combined = pd.concat([df_existing, df_final_new], ignore_index=True)
-    # 저장할 때는 혹시 모를 완전 동일 중복 한 번 더 제거
     combined = combined.drop_duplicates(subset=["_title_norm"], keep="last")
     combined = combined.sort_values("수집시각(KST)", ascending=False)
 
