@@ -13,7 +13,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import google.generativeai as genai
-from newspaper import Article
+from newspaper import Article, Config
 from datetime import datetime, timedelta
 
 # ============== 설정 ==============
@@ -36,10 +36,11 @@ def make_session() -> requests.Session:
     ad = HTTPAdapter(max_retries=retries)
     s.mount("http://", ad)
     s.mount("https://", ad)
-    # 일반 브라우저처럼 위장
+    # 구글이 봇을 차단하지 않도록 최신 브라우저처럼 위장
     s.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
     })
     return s
 
@@ -76,48 +77,64 @@ def utc_to_kst_str(utc_ts):
 def safe_name(name: str) -> str:
     return re.sub(r"[\\/:*?\[\]]", "_", str(name))[:64] or "Sheet"
 
-def resolve_final_url(session: requests.Session, url: str, timeout: float = 10.0) -> str:
-    """구글 뉴스 리다이렉트 최종 주소 추적 (강화됨)"""
+def get_real_url(session, url):
+    """구글 뉴스 리다이렉트를 추적하여 진짜 URL을 가져오는 함수"""
+    if "news.google.com" not in url:
+        return url
+    
     try:
-        # 1. news.google.com이 아니면 그냥 반환
-        if "news.google.com" not in url:
-            return url
-            
-        # 2. 리다이렉트 추적
-        r = session.get(url, allow_redirects=True, timeout=timeout)
+        # 1. 헤더를 포함하여 리다이렉트 추적
+        r = session.get(url, allow_redirects=True, timeout=10)
+        
+        # 2. 만약 최종 URL도 여전히 news.google.com이라면 (봇 차단 등으로 인해)
+        # newspaper3k가 처리를 못하므로 실패로 간주하거나 그냥 원본 반환
+        if "news.google.com" in r.url:
+            # HTML 내에서 실제 링크를 찾으려는 시도 (고급)
+            # 여기서는 너무 복잡해지므로 패스하고, 
+            # 단순히 리다이렉트된 결과가 news.google이 아니길 기대함.
+            return r.url 
+        
         return r.url
-    except: 
+    except:
         return url
 
 # ============== AI & 본문 추출 ==============
 def extract_article_content(url: str) -> str:
     try:
-        # news.google.com 링크는 newspaper3k가 못 읽음. 원문이어야 함.
+        # URL이 여전히 news.google.com이면 newspaper3k는 실패함
         if "news.google.com" in url:
-            return "" 
+            return ""
 
-        article = Article(url, language='ko')
+        # newspaper 설정을 통해 브라우저 위장 강화
+        config = Config()
+        config.browser_user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        config.request_timeout = 10
+
+        article = Article(url, language='ko', config=config)
         article.download()
         article.parse()
         text = article.text.strip()
-        return text if len(text) >= 100 else "" # 너무 짧으면 실패 간주
-    except: return ""
+        
+        # 본문이 너무 짧으면(네비게이션 메뉴 등만 긁어온 경우) 실패 처리
+        return text if len(text) >= 100 else "" 
+    except Exception as e:
+        return ""
 
 def summarize_with_gemini(text: str) -> str:
     if not GEMINI_API_KEY or not text: return ""
     try:
         model = genai.GenerativeModel('gemini-1.5-flash')
         prompt = (
-            "너는 직업훈련 뉴스 요약 비서야. 아래 기사 내용을 한국어로 2~3줄로 요약해줘.\n"
-            "단, 기사 제목에 있는 내용을 단순히 반복하지 말고, 제목이 설명하지 못하는 '구체적인 수치', '배경', '향후 계획' 위주로 요약해.\n"
-            "문장은 '- '로 시작하는 개조식으로 작성해줘.\n\n"
-            f"기사 내용:\n{text[:5000]}"
+            "너는 뉴스 요약 전문가야. 아래 뉴스 기사 내용을 읽고, "
+            "바쁜 직장인이 핵심만 파악할 수 있도록 3줄 이내로 요약해줘.\n"
+            "형식: '- '로 시작하는 문장.\n\n"
+            f"기사 내용:\n{text[:4000]}"
         )
         response = model.generate_content(prompt)
         return response.text.strip()
     except: return ""
 
-# ============== 이메일 발송 ==============
+# ============== 이메일 발송 (디자인 업그레이드) ==============
 def send_email_report(df_new, target_date_str):
     if not EMAIL_USER or not EMAIL_PASSWORD or not EMAIL_RECEIVER:
         print("[WARN] 이메일 설정 누락. 발송 생략.")
@@ -129,30 +146,55 @@ def send_email_report(df_new, target_date_str):
 
     subject = f"[일병리포트] {target_date_str} 주요 뉴스 알림"
 
+    # 카드 뉴스 스타일 CSS
     html_body = f"""
     <html>
     <head>
         <style>
-            body {{ font-family: 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif; line-height: 1.6; color: #333; }}
-            .container {{ max-width: 800px; margin: 0 auto; padding: 20px; }}
-            .header {{ background-color: #f4f6f8; padding: 15px; border-radius: 8px; margin-bottom: 20px; }}
-            .keyword-group {{ margin-bottom: 30px; border-bottom: 2px solid #eee; padding-bottom: 20px; }}
-            .keyword-title {{ color: #2980b9; font-size: 18px; font-weight: bold; margin-bottom: 15px; border-left: 5px solid #2980b9; padding-left: 10px; }}
-            .news-item {{ margin-bottom: 15px; }}
-            .news-title {{ font-size: 15px; font-weight: bold; color: #2c3e50; text-decoration: none; }}
-            .news-title:hover {{ text-decoration: underline; }}
-            .news-meta {{ font-size: 12px; color: #7f8c8d; margin-left: 5px; }}
-            .news-summary {{ margin-top: 5px; margin-left: 15px; font-size: 13px; color: #555; background-color: #fafafa; padding: 8px; border-radius: 4px; }}
-            .footer {{ font-size: 11px; color: #aaa; text-align: center; margin-top: 30px; }}
+            body {{ font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; background-color: #f4f4f4; margin: 0; padding: 20px; }}
+            .container {{ max-width: 700px; margin: 0 auto; background-color: #ffffff; padding: 30px; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }}
+            .header {{ text-align: center; margin-bottom: 30px; border-bottom: 2px solid #3498db; padding-bottom: 20px; }}
+            .header h1 {{ color: #2c3e50; font-size: 24px; margin: 0; }}
+            .header p {{ color: #7f8c8d; font-size: 14px; margin-top: 10px; }}
+            
+            .keyword-section {{ margin-bottom: 40px; }}
+            .keyword-title {{ 
+                background-color: #3498db; color: white; padding: 8px 15px; 
+                display: inline-block; border-radius: 20px; font-weight: bold; font-size: 16px; margin-bottom: 15px;
+            }}
+            
+            .news-card {{ 
+                border: 1px solid #e0e0e0; border-radius: 8px; padding: 15px; margin-bottom: 15px; 
+                background-color: #fff; transition: transform 0.2s;
+            }}
+            .news-card:hover {{ border-color: #3498db; }}
+            
+            .news-title {{ 
+                font-size: 18px; font-weight: bold; color: #2c3e50; text-decoration: none; display: block; margin-bottom: 8px; line-height: 1.4;
+            }}
+            .news-title:hover {{ color: #3498db; text-decoration: underline; }}
+            
+            .news-meta {{ font-size: 12px; color: #95a5a6; margin-bottom: 12px; }}
+            
+            .news-summary {{ 
+                background-color: #f9f9f9; padding: 12px; border-left: 4px solid #3498db; 
+                color: #555; font-size: 14px; line-height: 1.6; border-radius: 4px;
+            }}
+            .news-summary ul {{ margin: 0; padding-left: 20px; }}
+            .news-summary li {{ margin-bottom: 5px; }}
+            
+            .footer {{ text-align: center; margin-top: 40px; font-size: 12px; color: #bdc3c7; }}
+            .btn-link {{
+                display: inline-block; background-color: #f1f1f1; color: #555; 
+                padding: 5px 10px; border-radius: 4px; text-decoration: none; font-size: 12px; margin-top: 5px;
+            }}
         </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
-                <h2 style="margin:0;">📢 어제({target_date_str})의 직업훈련 뉴스</h2>
-                <p style="margin:5px 0 0 0; font-size:14px; color:#666;">
-                    총 {len(df_new)}건의 기사가 수집되었습니다.
-                </p>
+                <h1>📰 {target_date_str} 뉴스 리포트</h1>
+                <p>어제 수집된 총 {len(df_new)}건의 기사 요약입니다.</p>
             </div>
     """
 
@@ -161,31 +203,33 @@ def send_email_report(df_new, target_date_str):
     for kw in KEYWORDS:
         if kw in grouped.groups:
             group_df = grouped.get_group(kw)
-            html_body += f'<div class="keyword-group">'
-            html_body += f'<div class="keyword-title">📃 키워드: {kw}</div>'
             
-            for i, (_, row) in enumerate(group_df.iterrows(), 1):
+            html_body += f'<div class="keyword-section">'
+            html_body += f'<div class="keyword-title"># {kw}</div>'
+            
+            for idx, row in group_df.iterrows():
                 title = row['제목']
                 link = row['원문링크']
                 source = row['출처']
                 date = row['발행일(KST)']
                 summary = row['요약']
 
-                if not summary:
-                    # 요약이 정말 없을 때
-                    summary_html = "<span style='color:#ccc; font-size:12px;'>👉 클릭하여 원문 확인</span>"
-                else:
+                # 요약 HTML 처리
+                if summary:
+                    # 마크다운 스타일(- )을 HTML 리스트로 변환하면 더 예쁨
                     summary_html = summary.replace('\n', '<br>')
+                else:
+                    summary_html = "<span style='color:#bbb;'>요약된 내용이 없습니다. 원문 링크를 확인해주세요.</span>"
 
                 html_body += f"""
-                <div class="news-item">
-                    <div>
-                        <span style="color:#e67e22; font-weight:bold; margin-right:5px;">{i}.</span>
-                        <a href="{link}" class="news-title" target="_blank">{title}</a>
-                        <span class="news-meta">({source} | {date})</span>
-                    </div>
+                <div class="news-card">
+                    <a href="{link}" class="news-title" target="_blank">{title}</a>
+                    <div class="news-meta">{source} · {date}</div>
                     <div class="news-summary">
                         {summary_html}
+                    </div>
+                    <div style="text-align:right;">
+                        <a href="{link}" class="btn-link" target="_blank">원문 보러가기 →</a>
                     </div>
                 </div>
                 """
@@ -193,8 +237,7 @@ def send_email_report(df_new, target_date_str):
 
     html_body += """
             <div class="footer">
-                본 메일은 자동화 봇에 의해 발송되었습니다.<br>
-                GitHub Actions & Google Gemini API
+                Automated by GitHub Actions & Google Gemini
             </div>
         </div>
     </body>
@@ -219,7 +262,6 @@ def send_email_report(df_new, target_date_str):
 # ============== 크롤링 ==============
 def crawl_google_news_rss(session, keyword):
     q = urllib.parse.quote(keyword)
-    # when:1d 옵션으로 최근 24시간(또는 하루) 기사만 검색 유도
     url = f"https://news.google.com/rss/search?q={q}+when:1d&hl=ko&gl=KR&ceid=KR:ko"
     try:
         resp = session.get(url, timeout=20)
@@ -236,8 +278,8 @@ def crawl_google_news_rss(session, keyword):
         pub_date_str = it.pubDate.text if it.pubDate else ""
         pub_ts_utc = parse_pub_date(pub_date_str)
         
-        # 1차 리다이렉트 해석 시도 (중요: AI 요약을 위해 진짜 주소 필요)
-        final_link = resolve_final_url(session, link)
+        # ★ 핵심: 진짜 URL로 변환 시도
+        final_link = get_real_url(session, link)
         
         rows.append({
             "키워드": keyword,
@@ -247,8 +289,7 @@ def crawl_google_news_rss(session, keyword):
             "발행일_UTC": pub_ts_utc,
             "수집시각_UTC": collected_at_utc,
             "_정규화링크": normalize_url(final_link),
-            "요약": "", 
-            "_rss_desc": "" # description은 제거 (요약 퀄리티 저하 원인)
+            "요약": ""
         })
     return rows
 
@@ -261,32 +302,28 @@ def main():
     now_kst = pd.Timestamp.now(tz="Asia/Seoul")
     yesterday_kst = now_kst - pd.Timedelta(days=1)
     target_date_str = yesterday_kst.strftime("%Y-%m-%d")
-    print(f"🎯 타겟 날짜(어제): {target_date_str} (기사 필터링 기준)")
+    print(f"🎯 타겟 날짜(어제): {target_date_str}")
 
     all_path = DATA_DIR / "ALL.csv"
     req_cols = ["키워드","제목","원문링크","발행일(KST)","수집시각(KST)","출처","요약",
                 "_정규화링크","_발행일_dt","_수집시각_dt","_is_new"]
     
-    # 1. 기존 데이터 로드 및 타입 강제 변환 (에러 수정 핵심)
     if all_path.exists():
         df_existing = pd.read_csv(all_path, dtype=str, encoding="utf-8-sig")
         for c in req_cols: 
             if c not in df_existing.columns: df_existing[c] = ""
-        
-        # ★★★ 여기서 날짜 타입으로 강제 변환해줘야 에러가 안 남 ★★★
         df_existing["_수집시각_dt"] = pd.to_datetime(df_existing["_수집시각_dt"], errors="coerce")
-        
         existing_links = set(df_existing["_정규화링크"].dropna().astype(str))
     else:
         df_existing = pd.DataFrame(columns=req_cols)
         existing_links = set()
 
-    # 2. 크롤링
+    # 크롤링
     raw_rows = []
     for kw in KEYWORDS:
         print(f"📡 수집 중: {kw}...")
         raw_rows.extend(crawl_google_news_rss(session, kw))
-        time.sleep(1) # 차단 방지 딜레이
+        time.sleep(1)
     
     if not raw_rows: 
         print("수집된 데이터가 없습니다.")
@@ -294,76 +331,57 @@ def main():
 
     df_crawled = pd.DataFrame(raw_rows)
     
-    # 3. 날짜 필터링 (어제 날짜인 것만 남김)
-    # 발행일(UTC)을 KST로 변환 후 문자열 비교
+    # 어제 날짜 필터링
     df_crawled["발행일(KST)"] = df_crawled["발행일_UTC"].apply(utc_to_kst_str)
-    # 'YYYY-MM-DD' 부분만 잘라서 어제 날짜와 비교
     df_crawled = df_crawled[df_crawled["발행일(KST)"].str.startswith(target_date_str)]
     
     if df_crawled.empty:
         print(f"📅 {target_date_str} 날짜에 해당하는 기사가 없습니다.")
         return
 
-    # 4. 중복 제거 (기존 DB에 없는 것만)
+    # 중복 제거
     df_crawled["_is_new"] = ~df_crawled["_정규화링크"].astype(str).isin(existing_links)
     df_crawled = df_crawled.drop_duplicates(subset=["_정규화링크"], keep="first")
     
     df_to_process = df_crawled[df_crawled["_is_new"] == True].copy()
     print(f"🔎 {target_date_str} 기사 중 신규 {len(df_to_process)}건 발견.")
 
-    # 5. 본문 추출 및 요약
+    # 요약
     processed_rows = []
     for idx, row in df_to_process.iterrows():
         print(f"   Processing: {row['제목'][:20]}...")
-        
-        # 진짜 URL이어야만 본문 추출 가능
         real_url = row["원문링크"]
-        content = extract_article_content(real_url)
         
+        # 요약 시도
+        content = extract_article_content(real_url)
         summary = ""
         if content:
-            # AI 요약 시도
-            ai_summary = summarize_with_gemini(content)
-            if ai_summary:
-                summary = ai_summary
-                time.sleep(4) # API 제한 고려
-        
-        # AI 실패 시: '본문 추출 실패' 대신 RSS 제목 반복을 피하고 깔끔하게 처리
-        if not summary:
-             summary = "" # 공란으로 두면 메일 템플릿에서 '클릭하여 확인'으로 처리
-
+            summary = summarize_with_gemini(content)
+            time.sleep(2) # 속도 조절
+            
         row["요약"] = summary
         processed_rows.append(row)
 
     if processed_rows:
         df_new_processed = pd.DataFrame(processed_rows)
-    else:
-        df_new_processed = pd.DataFrame(columns=df_crawled.columns)
-
-    # 6. 메일 발송 (어제 기사만 모아서)
-    if not df_new_processed.empty:
-        # 나머지 컬럼 채우기
+        # 메일 발송
         df_new_processed["수집시각(KST)"] = df_new_processed["수집시각_UTC"].apply(utc_to_kst_str)
         df_new_processed["_발행일_dt"] = pd.to_datetime(df_new_processed["발행일(KST)"], errors="coerce")
         df_new_processed["_수집시각_dt"] = pd.to_datetime(df_new_processed["수집시각(KST)"], errors="coerce")
-        
         send_email_report(df_new_processed, target_date_str)
+    else:
+        df_new_processed = pd.DataFrame(columns=df_crawled.columns)
 
-    # 7. 저장 (기존 + 신규)
+    # 저장
     df_final_new = df_new_processed[req_cols] if not df_new_processed.empty else pd.DataFrame(columns=req_cols)
-    
-    # 병합
     combined = pd.concat([df_existing, df_final_new], ignore_index=True)
     combined = combined.drop_duplicates(subset=["_정규화링크"], keep="last")
-    
-    # 정렬 (여기서 에러 안 나게 _수집시각_dt가 datetime인지 확인)
     combined["_수집시각_dt"] = pd.to_datetime(combined["_수집시각_dt"], errors="coerce")
     combined = combined.sort_values("_수집시각_dt", ascending=False)
 
     display_cols = ["키워드","제목","요약","원문링크","발행일(KST)","수집시각(KST)","출처"]
     combined[display_cols].to_csv(DATA_DIR / "ALL.csv", index=False, encoding="utf-8-sig")
     
-    # 최신 파일은 '오늘 수집한 어제 뉴스'만 저장
     if not df_new_processed.empty:
         df_new_processed[display_cols].to_csv(DATA_DIR / "NEW_latest.csv", index=False, encoding="utf-8-sig")
     
