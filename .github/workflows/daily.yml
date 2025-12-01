@@ -24,10 +24,12 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      # 3) 라이브러리 설치
+      # 3) 라이브러리 설치 (★ 핵심: AI 라이브러리 강제 업데이트)
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # 기존 캐시 무시하고 AI 라이브러리를 최신으로 강제 설치
+          pip install --upgrade google-generativeai
           pip install -r requirements.txt
 
       # 4) 뉴스 수집 실행
@@ -47,7 +49,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           
-          # CSV 파일이 실제로 존재하는지 확인 후 add 실행
           if [ -n "$(find data -name '*.csv' 2>/dev/null)" ]; then
             git add data/*.csv
             git commit -m "auto: daily news update $(date -u +'%Y-%m-%dT%H:%MZ')" || echo "No changes to commit"
