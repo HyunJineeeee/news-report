@@ -14,6 +14,6 @@ scikit-learn>=1.4.0
 matplotlib>=3.9.0
 wordcloud
 
+# AI & Content Extraction (New)
 newspaper3k
-openai
-schedule  # (로컬에서 돌린다면 필요, 깃허브 액션이면 불필요)
+google-generativeai
