@@ -179,10 +179,14 @@ def crawl_naver_news(keyword, target_date_str):
         })
     return rows
 
-# ============== 이메일 발송 ==============
+# ============== 이메일 발송 (다중 수신자 지원) ==============
 def send_email_report(df_new, target_date_str):
     if not EMAIL_USER or not EMAIL_PASSWORD or not EMAIL_RECEIVER: return
     if df_new.empty: return
+
+    # 수신자 리스트 처리 (쉼표로 구분하여 리스트로 변환)
+    # 예: "a@b.com, c@d.com" -> ["a@b.com", "c@d.com"]
+    receivers = [addr.strip() for addr in EMAIL_RECEIVER.split(',')]
 
     subject = f"[일병리포트] {target_date_str} 주요 뉴스 알림"
 
@@ -250,14 +254,20 @@ def send_email_report(df_new, target_date_str):
         msg = MIMEMultipart()
         msg['Subject'] = subject
         msg['From'] = EMAIL_USER
-        msg['To'] = EMAIL_RECEIVER
+        
+        # 받는 사람 헤더에는 콤마로 연결된 문자열을 넣습니다 (보여주기용)
+        msg['To'] = ", ".join(receivers) 
+        
         msg.attach(MIMEText(html_body, 'html'))
 
         with smtplib.SMTP('smtp.gmail.com', 587) as server:
             server.starttls()
             server.login(EMAIL_USER, EMAIL_PASSWORD)
-            server.send_message(msg)
-        print(f"📧 이메일 발송 성공! ({subject})")
+            
+            # 실제 발송은 리스트 전체에게 수행
+            server.sendmail(EMAIL_USER, receivers, msg.as_string())
+            
+        print(f"📧 이메일 발송 성공! (수신자: {len(receivers)}명)")
     except Exception as e:
         print(f"❌ 이메일 발송 실패: {e}")
 
