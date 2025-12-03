@@ -14,7 +14,6 @@ import trafilatura
 import difflib
 import urllib3
 
-# SSL 경고 무시
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ============== 설정 ==============
@@ -27,7 +26,7 @@ KEYWORD_COLORS = {
     "고용노동부": "#7f8c8d", "한국산업인력공단": "#2c3e50"
 }
 
-# 환경변수 로드
+# 환경변수
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 EMAIL_USER = os.environ.get("EMAIL_USER")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
@@ -49,13 +48,13 @@ def is_similar(text1, text2):
     if not text1 or not text2: return False
     return difflib.SequenceMatcher(None, text1, text2).ratio() >= SIMILARITY_THRESHOLD
 
-# ============== AI 기능 (REST API + 디버깅 로그 추가) ==============
+# ============== AI 기능 (상세 디버깅) ==============
 def call_gemini_rest(prompt):
     if not GEMINI_API_KEY: 
-        print("❌ [오류] API 키가 설정되지 않았습니다.")
+        print("❌ [API Key Error] 키가 설정되지 않았습니다.")
         return ""
     
-    # 모델 1순위: 1.5-flash, 2순위: pro
+    # 1.5 Flash와 Pro 모델 순차 시도
     models = ["gemini-1.5-flash", "gemini-pro"]
     
     for model in models:
@@ -72,41 +71,42 @@ def call_gemini_rest(prompt):
         }
         
         try:
-            response = requests.post(url, headers=headers, json=data, timeout=20)
-            if response.status_code == 200:
-                result_json = response.json()
-                try:
-                    text = result_json['candidates'][0]['content']['parts'][0]['text'].strip()
-                    if text: return text
-                except KeyError:
-                    # 응답은 왔는데 내용이 없는 경우 (차단됨 등)
-                    # print(f"⚠️ [{model}] 응답 내용 없음: {result_json}") # 디버깅용
-                    continue
-            else:
-                # print(f"⚠️ [{model}] HTTP 오류: {response.status_code}") # 디버깅용
+            response = requests.post(url, headers=headers, json=data, timeout=15)
+            
+            # ★★★ 디버깅: 실패 시 구글의 응답 메시지 원본 출력 ★★★
+            if response.status_code != 200:
+                print(f"⚠️ [{model}] API 오류 ({response.status_code}): {response.text}")
                 continue
+
+            result_json = response.json()
+            try:
+                # 정상 응답 파싱
+                text = result_json['candidates'][0]['content']['parts'][0]['text'].strip()
+                if text: return text
+            except (KeyError, IndexError):
+                # 200 OK인데 내용이 없는 경우 (보통 필터링됨)
+                print(f"⚠️ [{model}] 내용 없음 (필터링됨?): {result_json}")
+                continue
+                
         except Exception as e:
-            # print(f"⚠️ [{model}] 접속 오류: {e}")
+            print(f"⚠️ [{model}] 통신 오류: {e}")
             continue
             
-    return "" # 모든 모델 실패
+    return ""
 
 def summarize_article(text: str) -> str:
     prompt = (
-        "너는 뉴스 리포트 봇이야. 아래 기사 본문을 읽고 핵심 내용을 2~3줄로 요약해.\n"
-        "형식: '- '로 시작하는 개조식 문장.\n"
-        "조건: 감정을 배제하고 건조한 보고서체 사용.\n"
-        "주의: 서론 없이 바로 요약 내용만 출력.\n\n"
-        f"기사 본문:\n{text[:4000]}"
+        "뉴스 요약 봇. 아래 글을 2줄 이내로 요약해.\n"
+        "형식: '- '로 시작.\n"
+        f"내용:\n{text[:3000]}"
     )
     return call_gemini_rest(prompt)
 
 def repair_snippet(snippet: str) -> str:
     prompt = (
-        "너는 문장 교정 전문가야. 아래 텍스트는 기사 요약의 일부인데 문장이 잘려 있어.\n"
-        "내용을 추론하여 **완전한 하나의 요약 문장**으로 다듬어줘.\n"
-        "형식: '- '로 시작.\n\n"
-        f"입력 텍스트:\n{snippet}"
+        "문장 완성 봇. 아래 끊긴 문장을 자연스럽게 완성해.\n"
+        "형식: '- '로 시작.\n"
+        f"입력:\n{snippet}"
     )
     return call_gemini_rest(prompt)
 
@@ -114,7 +114,7 @@ def repair_snippet(snippet: str) -> str:
 def extract_article_content(url: str) -> str:
     if not url: return ""
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0',
         'Referer': 'https://news.naver.com/'
     }
     try:
@@ -125,7 +125,7 @@ def extract_article_content(url: str) -> str:
         return ""
     except: return ""
 
-# ============== 네이버 뉴스 검색 API ==============
+# ============== 네이버 뉴스 검색 ==============
 def crawl_naver_news(keyword, target_date_str):
     if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
         print("[ERROR] 네이버 API 키 누락")
@@ -212,12 +212,8 @@ def send_email_report(df_new, target_date_str):
                 link = row['원문링크']
                 date = row['발행일(KST)']
                 summary = row['요약']
-                
-                # 요약 HTML 처리 (줄바꿈)
                 summary_html = summary.replace('\n', '<br>')
-                
-                # 테두리 색상 결정
-                border_color = kw_color
+                border_color = kw_color if summary and "실패" not in summary else "#ddd"
                 
                 html_body += f"""
                 <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 15px; background-color: #fff;">
@@ -241,7 +237,7 @@ def send_email_report(df_new, target_date_str):
 
     html_body += """
             <div style="text-align: center; margin-top: 40px; font-size: 12px; color: #bdc3c7; border-top: 1px solid #eee; padding-top: 20px;">
-                Automated by GitHub Actions & Naver API
+                Automated by GitHub Actions
             </div>
         </div>
     </div>
@@ -285,7 +281,7 @@ def main():
 
     raw_rows = []
     for kw in KEYWORDS:
-        print(f"📡 수집 중 (Naver): {kw}...")
+        print(f"📡 수집 중: {kw}...")
         raw_rows.extend(crawl_naver_news(kw, target_date_str))
         time.sleep(0.5)
     
@@ -294,18 +290,24 @@ def main():
         return
 
     unique_rows = []
+    print("🧹 중복 제거 수행 중...")
     for row in raw_rows:
         new_title_norm = row["_title_norm"]
         is_duplicate = False
+        
         for exist_title in existing_titles:
-            if is_similar(new_title_norm, exist_title):
+            similarity = difflib.SequenceMatcher(None, new_title_norm, exist_title).ratio()
+            if similarity >= 0.4:
                 is_duplicate = True
                 break
         if is_duplicate: continue
+        
         for accepted in unique_rows:
-            if is_similar(new_title_norm, accepted["_title_norm"]):
+            similarity = difflib.SequenceMatcher(None, new_title_norm, accepted["_title_norm"]).ratio()
+            if similarity >= 0.4:
                 is_duplicate = True
                 break
+        
         if not is_duplicate:
             unique_rows.append(row)
 
@@ -319,7 +321,6 @@ def main():
         keyword = row["키워드"]
         api_desc = row["_api_desc"]
         
-        # 1. 본문 추출
         content = extract_article_content(target_url)
         summary = ""
         
@@ -330,20 +331,12 @@ def main():
             summary = summarize_article(content)
             time.sleep(2)
         
-        # ★★★ 최종 안전장치 수정 ★★★
-        # AI가 빈 값을 반환했을 때 (summary가 비었을 때)
         if not summary:
-            # 복원 시도
             restored = repair_snippet(api_desc)
             if restored:
                 summary = restored
             else:
-                # 2차 시도도 실패하면 네이버 요약(api_desc)을 그대로 사용
-                # 단, api_desc가 비어있으면 대체 텍스트 사용
-                if api_desc:
-                    summary = f"- {api_desc}"
-                else:
-                    summary = "- 요약할 내용이 없습니다. 원문을 확인해주세요."
+                summary = f"- {api_desc}" # AI 완전 실패 시 원본
             
         row["요약"] = summary
         processed_rows.append(row)
@@ -351,22 +344,19 @@ def main():
     if processed_rows:
         df_new_processed = pd.DataFrame(processed_rows)
         send_email_report(df_new_processed, target_date_str)
+        
+        # 저장
+        df_final_new = df_new_processed[req_cols]
+        combined = pd.concat([df_existing, df_final_new], ignore_index=True)
+        combined = combined.drop_duplicates(subset=["_title_norm"], keep="last")
+        combined = combined.sort_values("수집시각(KST)", ascending=False)
+
+        display_cols = ["키워드","제목","요약","원문링크","발행일(KST)","수집시각(KST)"]
+        combined[display_cols].to_csv(DATA_DIR / "ALL.csv", index=False, encoding="utf-8-sig")
+        df_final_new[display_cols].to_csv(DATA_DIR / "NEW_latest.csv", index=False, encoding="utf-8-sig")
+        print("🎉 완료")
     else:
         print("🧹 처리할 신규 기사가 없습니다.")
-        df_new_processed = pd.DataFrame(columns=req_cols)
-
-    df_final_new = df_new_processed[req_cols] if not df_new_processed.empty else pd.DataFrame(columns=req_cols)
-    combined = pd.concat([df_existing, df_final_new], ignore_index=True)
-    combined = combined.drop_duplicates(subset=["_title_norm"], keep="last")
-    combined = combined.sort_values("수집시각(KST)", ascending=False)
-
-    display_cols = ["키워드","제목","요약","원문링크","발행일(KST)","수집시각(KST)"]
-    combined[display_cols].to_csv(DATA_DIR / "ALL.csv", index=False, encoding="utf-8-sig")
-    
-    if not df_new_processed.empty:
-        df_new_processed[display_cols].to_csv(DATA_DIR / "NEW_latest.csv", index=False, encoding="utf-8-sig")
-    
-    print("🎉 완료")
 
 if __name__ == "__main__":
     main()
