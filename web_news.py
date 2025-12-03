@@ -27,7 +27,7 @@ KEYWORD_COLORS = {
     "고용노동부": "#7f8c8d", "한국산업인력공단": "#2c3e50"
 }
 
-# 환경변수 로드 (GEMINI -> GROQ 변경)
+# 환경변수 로드
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 EMAIL_USER = os.environ.get("EMAIL_USER")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
@@ -49,11 +49,8 @@ def is_similar(text1, text2):
     if not text1 or not text2: return False
     return difflib.SequenceMatcher(None, text1, text2).ratio() >= SIMILARITY_THRESHOLD
 
-# ============== AI 기능 (Groq API 사용) ==============
+# ============== AI 기능 (Groq API 사용 - 최신 모델) ==============
 def call_groq_api(prompt):
-    """
-    Groq Cloud API를 사용하여 Llama 3 모델로 텍스트 처리
-    """
     if not GROQ_API_KEY: 
         print("❌ [오류] GROQ_API_KEY가 없습니다.")
         return ""
@@ -66,13 +63,14 @@ def call_groq_api(prompt):
     }
     
     data = {
-        "model": "llama3-8b-8192", # 한국어 잘하고 빠르고 무료인 모델
+        # ★ 핵심 변경: 최신 모델로 교체 (라마 3.3)
+        "model": "llama-3.3-70b-versatile",
         "messages": [
-            {"role": "system", "content": "너는 뉴스 요약 전문가야. 한국어로 답변해."},
+            {"role": "system", "content": "You are a helpful news summarizer. Answer in Korean."},
             {"role": "user", "content": prompt}
         ],
-        "temperature": 0.5, # 창의성 낮추고 사실 위주로
-        "max_tokens": 300
+        "temperature": 0.5,
+        "max_tokens": 500
     }
     
     try:
@@ -89,7 +87,7 @@ def call_groq_api(prompt):
 def summarize_article(text: str) -> str:
     prompt = (
         "아래 뉴스 기사를 읽고 핵심 내용을 2~3줄로 요약해줘.\n"
-        "반드시 '- '로 시작하는 개조식 문장으로 작성해.\n"
+        "반드시 한국어로 작성하고, '- '로 시작하는 개조식 문장으로 써줘.\n"
         "불필요한 서론 없이 바로 요약 내용만 출력해.\n\n"
         f"기사 내용:\n{text[:3500]}"
     )
@@ -98,7 +96,7 @@ def summarize_article(text: str) -> str:
 def repair_snippet(snippet: str) -> str:
     prompt = (
         "아래 문장은 기사 요약의 일부인데 중간에 끊겨 있어. 내용을 추론하여 자연스러운 한 문장으로 완성해줘.\n"
-        "반드시 '- '로 시작해.\n\n"
+        "반드시 한국어로 작성하고, '- '로 시작해.\n\n"
         f"입력:\n{snippet}"
     )
     return call_groq_api(prompt)
@@ -334,7 +332,7 @@ def main():
                 print(f"   ❌ [제외] 본문에 '{keyword}' 없음")
                 continue 
             summary = summarize_article(content)
-            time.sleep(1) # Groq는 빨라서 1초면 충분
+            time.sleep(1) 
         
         if not summary:
             restored = repair_snippet(api_desc)
