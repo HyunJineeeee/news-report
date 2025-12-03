@@ -27,8 +27,8 @@ KEYWORD_COLORS = {
     "고용노동부": "#7f8c8d", "한국산업인력공단": "#2c3e50"
 }
 
-# 환경변수 로드
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+# 환경변수 로드 (GEMINI -> GROQ 변경)
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 EMAIL_USER = os.environ.get("EMAIL_USER")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.environ.get("EMAIL_RECEIVER")
@@ -49,77 +49,59 @@ def is_similar(text1, text2):
     if not text1 or not text2: return False
     return difflib.SequenceMatcher(None, text1, text2).ratio() >= SIMILARITY_THRESHOLD
 
-# ============== AI 기능 (상세 로그 출력) ==============
-def call_gemini_robust(prompt):
-    if not GEMINI_API_KEY: 
-        print("❌ [오류] API 키가 없습니다.")
+# ============== AI 기능 (Groq API 사용) ==============
+def call_groq_api(prompt):
+    """
+    Groq Cloud API를 사용하여 Llama 3 모델로 텍스트 처리
+    """
+    if not GROQ_API_KEY: 
+        print("❌ [오류] GROQ_API_KEY가 없습니다.")
         return ""
     
-    # 시도할 조합 (버전 + 모델명)
-    combinations = [
-        ("v1beta", "gemini-1.5-flash"),
-        ("v1beta", "gemini-1.5-flash-latest"),
-        ("v1", "gemini-1.5-flash"),
-        ("v1beta", "gemini-pro"),
-        ("v1", "gemini-pro")
-    ]
+    url = "https://api.groq.com/openai/v1/chat/completions"
     
-    headers = {"Content-Type": "application/json"}
-    data = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "safetySettings": [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
-        ]
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
     }
-
-    for version, model in combinations:
-        url = f"https://generativelanguage.googleapis.com/{version}/models/{model}:generateContent?key={GEMINI_API_KEY}"
-        try:
-            response = requests.post(url, headers=headers, json=data, timeout=10)
-            
-            if response.status_code == 200:
-                try:
-                    result_json = response.json()
-                    text = result_json['candidates'][0]['content']['parts'][0]['text'].strip()
-                    if text:
-                        # ★ 성공 로그 출력
-                        # print(f"   ✅ [AI 성공] {model} ({version})") 
-                        return text
-                except:
-                    continue
-            else:
-                # ★ 실패 로그 출력 (어떤 모델이 안되는지 확인용)
-                print(f"   ⚠️ [AI 실패] {model} ({version}) -> Status {response.status_code}, 다음 시도...")
-                continue
-                
-        except Exception as e:
-            print(f"   ⚠️ [AI 에러] {model} ({version}) -> {e}")
-            continue
-            
-    print("   ❌ [AI 완전 실패] 모든 모델 시도 실패")
-    return ""
+    
+    data = {
+        "model": "llama3-8b-8192", # 한국어 잘하고 빠르고 무료인 모델
+        "messages": [
+            {"role": "system", "content": "너는 뉴스 요약 전문가야. 한국어로 답변해."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.5, # 창의성 낮추고 사실 위주로
+        "max_tokens": 300
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data, timeout=20)
+        if response.status_code == 200:
+            return response.json()['choices'][0]['message']['content'].strip()
+        else:
+            print(f"⚠️ Groq API 오류: {response.status_code} - {response.text}")
+            return ""
+    except Exception as e:
+        print(f"⚠️ 연결 오류: {e}")
+        return ""
 
 def summarize_article(text: str) -> str:
     prompt = (
-        "너는 뉴스 리포트 봇이야. 아래 기사 본문을 읽고 핵심 내용을 2~3줄로 요약해.\n"
-        "형식: '- '로 시작하는 개조식 문장.\n"
-        "조건: 감정을 배제하고 건조한 보고서체 사용.\n"
-        "주의: 서론 없이 바로 요약 내용만 출력.\n\n"
-        f"기사 본문:\n{text[:3500]}"
+        "아래 뉴스 기사를 읽고 핵심 내용을 2~3줄로 요약해줘.\n"
+        "반드시 '- '로 시작하는 개조식 문장으로 작성해.\n"
+        "불필요한 서론 없이 바로 요약 내용만 출력해.\n\n"
+        f"기사 내용:\n{text[:3500]}"
     )
-    return call_gemini_robust(prompt)
+    return call_groq_api(prompt)
 
 def repair_snippet(snippet: str) -> str:
     prompt = (
-        "너는 문장 교정 전문가야. 아래 텍스트는 기사 요약의 일부인데 문장이 잘려 있어.\n"
-        "내용을 추론하여 **완전한 하나의 요약 문장**으로 다듬어줘.\n"
-        "형식: '- '로 시작.\n\n"
-        f"입력 텍스트:\n{snippet}"
+        "아래 문장은 기사 요약의 일부인데 중간에 끊겨 있어. 내용을 추론하여 자연스러운 한 문장으로 완성해줘.\n"
+        "반드시 '- '로 시작해.\n\n"
+        f"입력:\n{snippet}"
     )
-    return call_gemini_robust(prompt)
+    return call_groq_api(prompt)
 
 # ============== 본문 추출 ==============
 def extract_article_content(url: str) -> str:
@@ -129,14 +111,21 @@ def extract_article_content(url: str) -> str:
         'Referer': 'https://news.naver.com/'
     }
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
+        # 1. Trafilatura 시도
+        downloaded = trafilatura.fetch_url(url)
+        if downloaded:
+            text = trafilatura.extract(downloaded, include_comments=False, include_tables=False)
+            if text and len(text) >= 50: return text
+
+        # 2. Requests 시도
+        resp = requests.get(url, headers=headers, timeout=10, verify=False)
         if resp.status_code == 200:
-            text = trafilatura.extract(resp.text, include_comments=False, include_tables=False)
+            text = trafilatura.extract(resp.text, include_comments=False)
             if text and len(text) >= 50: return text
         return ""
     except: return ""
 
-# ============== 네이버 뉴스 검색 ==============
+# ============== 네이버 뉴스 검색 API ==============
 def crawl_naver_news(keyword, target_date_str):
     if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
         print("[ERROR] 네이버 API 키 누락")
@@ -153,8 +142,7 @@ def crawl_naver_news(keyword, target_date_str):
         resp = requests.get(url, headers=headers, params=params)
         resp.raise_for_status()
         data = resp.json()
-    except Exception as e:
-        print(f"   [API Error] {e}")
+    except:
         return []
 
     rows = []
@@ -175,6 +163,11 @@ def crawl_naver_news(keyword, target_date_str):
         title = clean_html(item['title'])
         desc = clean_html(item['description'])
         
+        # 중복 비교용 제목 (키워드 제거 후 비교)
+        norm_title = normalize_title(title)
+        for k in KEYWORDS:
+            norm_title = norm_title.replace(k, "")
+        
         rows.append({
             "키워드": keyword,
             "제목": title,
@@ -184,7 +177,7 @@ def crawl_naver_news(keyword, target_date_str):
             "수집시각(KST)": collected_at,
             "요약": "",
             "_api_desc": desc,
-            "_title_norm": normalize_title(title)
+            "_title_norm": norm_title
         })
     return rows
 
@@ -249,7 +242,7 @@ def send_email_report(df_new, target_date_str):
 
     html_body += """
             <div style="text-align: center; margin-top: 40px; font-size: 12px; color: #bdc3c7; border-top: 1px solid #eee; padding-top: 20px;">
-                Automated by GitHub Actions & Naver API
+                Automated by GitHub Actions & Groq AI
             </div>
         </div>
     </div>
@@ -293,7 +286,7 @@ def main():
 
     raw_rows = []
     for kw in KEYWORDS:
-        print(f"📡 수집 중 (Naver): {kw}...")
+        print(f"📡 수집 중: {kw}...")
         raw_rows.extend(crawl_naver_news(kw, target_date_str))
         time.sleep(0.5)
     
@@ -302,7 +295,7 @@ def main():
         return
 
     unique_rows = []
-    print("🧹 중복 제거 수행 중...")
+    print(f"🧹 중복 제거(유사도 40%) 수행 중...")
     for row in raw_rows:
         new_title_norm = row["_title_norm"]
         is_duplicate = False
@@ -341,10 +334,9 @@ def main():
                 print(f"   ❌ [제외] 본문에 '{keyword}' 없음")
                 continue 
             summary = summarize_article(content)
-            time.sleep(2)
+            time.sleep(1) # Groq는 빨라서 1초면 충분
         
         if not summary:
-            # 실패 시 복원
             restored = repair_snippet(api_desc)
             if restored:
                 summary = restored
