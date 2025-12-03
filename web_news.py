@@ -20,9 +20,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ============== 설정 ==============
 KEYWORDS = ["일학습병행", "직업훈련", "고용노동부", "한국산업인력공단"]
 DATA_DIR = Path("data")
-
-# ★ 중복 제거 기준: 10% (0.1) 이상 비슷하면 제거
-SIMILARITY_THRESHOLD = 0.1 
+SIMILARITY_THRESHOLD = 0.4
 
 KEYWORD_COLORS = {
     "일학습병행": "#3498db", "직업훈련": "#e67e22",
@@ -42,78 +40,75 @@ def clean_html(raw_html):
     if not raw_html: return ""
     cleanr = re.compile('<.*?>')
     cleantext = re.sub(cleanr, '', raw_html)
-    # 특수문자 및 지저분한 기호 정리
-    cleantext = cleantext.replace("&quot;", "'").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-    return cleantext
+    return cleantext.replace("&quot;", "'").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
 
-def normalize_for_comparison(title):
-    """
-    중복 비교를 위해 제목을 정규화하는 함수
-    1. 지정된 키워드 제거 (일학습병행, 직업훈련 등)
-    2. 특수문자/공백 제거
-    """
-    # 1. 키워드 제거
-    for kw in KEYWORDS:
-        title = title.replace(kw, "")
-    
-    # 2. 한글/영어/숫자만 남기고 다 제거
+def normalize_title(title):
     return re.sub(r'[^가-힣a-zA-Z0-9]', '', title)
 
 def is_similar(text1, text2):
-    """
-    두 텍스트(키워드 제거됨)의 유사도가 10% 이상인지 확인
-    """
     if not text1 or not text2: return False
-    
-    # 유사도 계산 (0.0 ~ 1.0)
-    similarity = difflib.SequenceMatcher(None, text1, text2).ratio()
-    
-    # 10% 이상이면 중복으로 간주 (True 반환)
-    return similarity >= SIMILARITY_THRESHOLD
+    return difflib.SequenceMatcher(None, text1, text2).ratio() >= SIMILARITY_THRESHOLD
 
-# ============== AI 기능 (REST API + 실패 시 조용히 처리) ==============
-def call_gemini_silent(prompt):
-    if not GEMINI_API_KEY: return None
+# ============== AI 기능 (REST API + 디버깅 로그 추가) ==============
+def call_gemini_rest(prompt):
+    if not GEMINI_API_KEY: 
+        print("❌ [오류] API 키가 설정되지 않았습니다.")
+        return ""
     
-    # 시도할 모델 리스트 (v1beta)
+    # 모델 1순위: 1.5-flash, 2순위: pro
     models = ["gemini-1.5-flash", "gemini-pro"]
     
-    headers = {"Content-Type": "application/json"}
-    data = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "safetySettings": [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
-        ]
-    }
-
-    for model_name in models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+    for model in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+        headers = {"Content-Type": "application/json"}
+        data = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+            ]
+        }
+        
         try:
-            response = requests.post(url, headers=headers, json=data, timeout=10)
+            response = requests.post(url, headers=headers, json=data, timeout=20)
             if response.status_code == 200:
-                return response.json()['candidates'][0]['content']['parts'][0]['text'].strip()
-        except:
+                result_json = response.json()
+                try:
+                    text = result_json['candidates'][0]['content']['parts'][0]['text'].strip()
+                    if text: return text
+                except KeyError:
+                    # 응답은 왔는데 내용이 없는 경우 (차단됨 등)
+                    # print(f"⚠️ [{model}] 응답 내용 없음: {result_json}") # 디버깅용
+                    continue
+            else:
+                # print(f"⚠️ [{model}] HTTP 오류: {response.status_code}") # 디버깅용
+                continue
+        except Exception as e:
+            # print(f"⚠️ [{model}] 접속 오류: {e}")
             continue
             
-    return None # 모든 시도 실패 시 None 반환 (에러 출력 X)
+    return "" # 모든 모델 실패
 
 def summarize_article(text: str) -> str:
     prompt = (
-        "뉴스 요약 봇. 다음 내용을 2줄 이내로 핵심만 요약.\n"
-        "형식: '- '로 시작.\n"
-        f"내용:\n{text[:3000]}"
+        "너는 뉴스 리포트 봇이야. 아래 기사 본문을 읽고 핵심 내용을 2~3줄로 요약해.\n"
+        "형식: '- '로 시작하는 개조식 문장.\n"
+        "조건: 감정을 배제하고 건조한 보고서체 사용.\n"
+        "주의: 서론 없이 바로 요약 내용만 출력.\n\n"
+        f"기사 본문:\n{text[:4000]}"
     )
-    return call_gemini_silent(prompt)
+    return call_gemini_rest(prompt)
 
 def repair_snippet(snippet: str) -> str:
     prompt = (
-        "문장 완성 봇. 아래 문장은 잘려있다. 내용을 추측하여 자연스러운 한 문장으로 완성하라.\n"
-        "형식: '- '로 시작.\n"
-        f"입력:\n{snippet}"
+        "너는 문장 교정 전문가야. 아래 텍스트는 기사 요약의 일부인데 문장이 잘려 있어.\n"
+        "내용을 추론하여 **완전한 하나의 요약 문장**으로 다듬어줘.\n"
+        "형식: '- '로 시작.\n\n"
+        f"입력 텍스트:\n{snippet}"
     )
-    return call_gemini_silent(prompt)
+    return call_gemini_rest(prompt)
 
 # ============== 본문 추출 (네이버 전용) ==============
 def extract_article_content(url: str) -> str:
@@ -147,7 +142,8 @@ def crawl_naver_news(keyword, target_date_str):
         resp = requests.get(url, headers=headers, params=params)
         resp.raise_for_status()
         data = resp.json()
-    except:
+    except Exception as e:
+        print(f"   [API Error] {e}")
         return []
 
     rows = []
@@ -168,9 +164,6 @@ def crawl_naver_news(keyword, target_date_str):
         title = clean_html(item['title'])
         desc = clean_html(item['description'])
         
-        # 중복 비교용 제목 생성 (키워드 제거됨)
-        norm_title = normalize_for_comparison(title)
-        
         rows.append({
             "키워드": keyword,
             "제목": title,
@@ -180,7 +173,7 @@ def crawl_naver_news(keyword, target_date_str):
             "수집시각(KST)": collected_at,
             "요약": "",
             "_api_desc": desc,
-            "_title_norm": norm_title
+            "_title_norm": normalize_title(title)
         })
     return rows
 
@@ -220,11 +213,11 @@ def send_email_report(df_new, target_date_str):
                 date = row['발행일(KST)']
                 summary = row['요약']
                 
-                # 요약 성공 시 줄바꿈
+                # 요약 HTML 처리 (줄바꿈)
                 summary_html = summary.replace('\n', '<br>')
                 
-                # 테두리 색상: AI 실패/성공 상관없이 키워드 색상 유지 (깔끔하게 보이기 위함)
-                border_color = kw_color 
+                # 테두리 색상 결정
+                border_color = kw_color
                 
                 html_body += f"""
                 <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 15px; background-color: #fff;">
@@ -300,27 +293,19 @@ def main():
         print(f"📅 {target_date_str} 날짜에 해당하는 기사가 없습니다.")
         return
 
-    # ★★★ 강력한 중복 제거 (키워드 제외 후 10% 유사도 체크) ★★★
     unique_rows = []
-    print(f"🧹 중복 제거(유사도 {int(SIMILARITY_THRESHOLD*100)}%) 수행 중...")
-    
     for row in raw_rows:
         new_title_norm = row["_title_norm"]
         is_duplicate = False
-        
-        # 1. 기존 DB와 비교
         for exist_title in existing_titles:
             if is_similar(new_title_norm, exist_title):
                 is_duplicate = True
                 break
         if is_duplicate: continue
-        
-        # 2. 이번 수집 내 비교
         for accepted in unique_rows:
             if is_similar(new_title_norm, accepted["_title_norm"]):
                 is_duplicate = True
                 break
-        
         if not is_duplicate:
             unique_rows.append(row)
 
@@ -334,6 +319,7 @@ def main():
         keyword = row["키워드"]
         api_desc = row["_api_desc"]
         
+        # 1. 본문 추출
         content = extract_article_content(target_url)
         summary = ""
         
@@ -344,15 +330,20 @@ def main():
             summary = summarize_article(content)
             time.sleep(2)
         
-        # ★ 최종 안전장치: AI가 실패하면 네이버 요약 원본을 그대로 보여줌 (에러 메시지 X)
+        # ★★★ 최종 안전장치 수정 ★★★
+        # AI가 빈 값을 반환했을 때 (summary가 비었을 때)
         if not summary:
-            # AI 복원 시도
+            # 복원 시도
             restored = repair_snippet(api_desc)
             if restored:
                 summary = restored
             else:
-                # AI가 완전 죽었으면 그냥 네이버 요약이라도 보여줌 (빈칸보다는 나음)
-                summary = f"- {api_desc} (내용 확인 필요)"
+                # 2차 시도도 실패하면 네이버 요약(api_desc)을 그대로 사용
+                # 단, api_desc가 비어있으면 대체 텍스트 사용
+                if api_desc:
+                    summary = f"- {api_desc}"
+                else:
+                    summary = "- 요약할 내용이 없습니다. 원문을 확인해주세요."
             
         row["요약"] = summary
         processed_rows.append(row)
