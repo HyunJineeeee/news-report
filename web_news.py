@@ -49,25 +49,26 @@ def is_similar(text1, text2):
     if not text1 or not text2: return False
     return difflib.SequenceMatcher(None, text1, text2).ratio() >= SIMILARITY_THRESHOLD
 
-# ============== ★ 핵심 변경: 라이브러리 없이 AI 호출 (REST API) ==============
-def call_gemini_raw(prompt):
+# ============== AI 기능 (REST API + 모델 순환) ==============
+def call_gemini_rotation(prompt):
     """
-    google-generativeai 라이브러리를 쓰지 않고,
-    HTTP 요청을 직접 보내서 답을 받아오는 함수 (호환성 문제 해결)
+    여러 모델 이름을 순차적으로 시도하여 하나라도 성공하면 결과를 반환.
     """
     if not GEMINI_API_KEY: return ""
     
-    # 구글 Gemini 1.5 Flash API 주소
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    # 시도할 모델 리스트 (최신 -> 구형 순서)
+    # 구글 서버 상태나 지역에 따라 되는 이름이 다를 수 있어 다 넣어둠
+    models = [
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-pro",
+        "gemini-1.0-pro",
+        "gemini-pro"
+    ]
     
-    headers = {
-        "Content-Type": "application/json"
-    }
-    
-    payload = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }],
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "contents": [{"parts": [{"text": prompt}]}],
         "safetySettings": [
             {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -75,22 +76,27 @@ def call_gemini_raw(prompt):
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
         ]
     }
-    
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=20)
-        if response.status_code == 200:
-            result = response.json()
-            # 응답 JSON에서 텍스트 추출
-            try:
-                return result['candidates'][0]['content']['parts'][0]['text'].strip()
-            except:
-                return ""
-        else:
-            print(f"⚠️ API 호출 실패: {response.status_code} - {response.text}")
-            return ""
-    except Exception as e:
-        print(f"⚠️ 연결 오류: {e}")
-        return ""
+
+    for model_name in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+        try:
+            response = requests.post(url, headers=headers, json=data, timeout=15)
+            
+            if response.status_code == 200:
+                result_json = response.json()
+                try:
+                    return result_json['candidates'][0]['content']['parts'][0]['text'].strip()
+                except:
+                    continue # 응답 형식이 이상하면 다음 모델로
+            else:
+                # 404나 500 에러면 다음 모델 시도
+                print(f"⚠️ {model_name} 실패 ({response.status_code}), 다음 모델 시도...")
+                continue
+                
+        except Exception:
+            continue
+
+    return "" # 모든 모델 실패 시 빈 문자열
 
 def summarize_article(text: str) -> str:
     prompt = (
@@ -98,9 +104,9 @@ def summarize_article(text: str) -> str:
         "형식: '- '로 시작하는 개조식 문장.\n"
         "조건: 감정을 배제하고 건조한 보고서체 사용.\n"
         "주의: 서론 없이 바로 요약 내용만 출력.\n\n"
-        f"기사 본문:\n{text[:4000]}"
+        f"기사 본문:\n{text[:3500]}"
     )
-    return call_gemini_raw(prompt)
+    return call_gemini_rotation(prompt)
 
 def repair_snippet(snippet: str) -> str:
     prompt = (
@@ -109,9 +115,9 @@ def repair_snippet(snippet: str) -> str:
         "형식: '- '로 시작.\n\n"
         f"입력 텍스트:\n{snippet}"
     )
-    return call_gemini_raw(prompt)
+    return call_gemini_rotation(prompt)
 
-# ============== 본문 추출 ==============
+# ============== 본문 추출 (네이버 전용) ==============
 def extract_article_content(url: str) -> str:
     if not url: return ""
     headers = {
@@ -213,9 +219,10 @@ def send_email_report(df_new, target_date_str):
                 link = row['원문링크']
                 date = row['발행일(KST)']
                 summary = row['요약']
-                summary_html = summary.replace('\n', '<br>')
                 
-                border_color = kw_color if summary and "실패" not in summary else "#ddd"
+                # 요약 성공 시 줄바꿈 처리
+                summary_html = summary.replace('\n', '<br>')
+                border_color = kw_color
                 
                 html_body += f"""
                 <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 15px; background-color: #fff;">
@@ -327,13 +334,13 @@ def main():
             summary = summarize_article(content)
             time.sleep(2)
         
-        if not summary or "부족합니다" in summary:
-            # 실패 시 복원
-            restored = repair_snippet(api_desc)
-            if restored and restored != api_desc:
-                summary = restored
-            else:
-                summary = f"- (내용 미리보기) {api_desc}" # AI 완전 실패 시 그냥 원문 표시
+        # ★ 최종 안전장치: AI가 전부 실패했다면?
+        if not summary:
+            # 1. API 설명글(api_desc)을 AI로 복원 시도
+            summary = repair_snippet(api_desc)
+            # 2. 그것도 실패했으면? 그냥 네이버 원문 그대로 사용 (에러 메시지 X)
+            if not summary:
+                summary = f"- {api_desc}"
             
         row["요약"] = summary
         processed_rows.append(row)
