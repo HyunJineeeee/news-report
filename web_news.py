@@ -14,6 +14,7 @@ import trafilatura
 import difflib
 import urllib3
 
+# SSL 경고 무시
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ============== 설정 ==============
@@ -26,7 +27,7 @@ KEYWORD_COLORS = {
     "고용노동부": "#7f8c8d", "한국산업인력공단": "#2c3e50"
 }
 
-# 환경변수
+# 환경변수 로드
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 EMAIL_USER = os.environ.get("EMAIL_USER")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
@@ -48,73 +49,82 @@ def is_similar(text1, text2):
     if not text1 or not text2: return False
     return difflib.SequenceMatcher(None, text1, text2).ratio() >= SIMILARITY_THRESHOLD
 
-# ============== AI 기능 (상세 디버깅) ==============
-def call_gemini_rest(prompt):
+# ============== AI 기능 (모든 버전/모델 순환 시도) ==============
+def call_gemini_robust(prompt):
     if not GEMINI_API_KEY: 
-        print("❌ [API Key Error] 키가 설정되지 않았습니다.")
+        print("❌ [오류] API 키가 없습니다.")
         return ""
     
-    # 1.5 Flash와 Pro 모델 순차 시도
-    models = ["gemini-1.5-flash", "gemini-pro"]
+    # 가능한 모든 조합 (버전 + 모델명)
+    # 최신 모델부터 구형 모델까지 순서대로 시도
+    combinations = [
+        ("v1beta", "gemini-1.5-flash"),
+        ("v1beta", "gemini-1.5-flash-latest"),
+        ("v1beta", "gemini-1.5-flash-001"),
+        ("v1", "gemini-1.5-flash"),
+        ("v1beta", "gemini-pro"),
+        ("v1", "gemini-pro"),
+        ("v1beta", "gemini-1.0-pro")
+    ]
     
-    for model in models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
-        headers = {"Content-Type": "application/json"}
-        data = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "safetySettings": [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
-            ]
-        }
-        
-        try:
-            response = requests.post(url, headers=headers, json=data, timeout=15)
-            
-            # ★★★ 디버깅: 실패 시 구글의 응답 메시지 원본 출력 ★★★
-            if response.status_code != 200:
-                print(f"⚠️ [{model}] API 오류 ({response.status_code}): {response.text}")
-                continue
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "safetySettings": [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+        ]
+    }
 
-            result_json = response.json()
-            try:
-                # 정상 응답 파싱
-                text = result_json['candidates'][0]['content']['parts'][0]['text'].strip()
-                if text: return text
-            except (KeyError, IndexError):
-                # 200 OK인데 내용이 없는 경우 (보통 필터링됨)
-                print(f"⚠️ [{model}] 내용 없음 (필터링됨?): {result_json}")
+    for version, model in combinations:
+        url = f"https://generativelanguage.googleapis.com/{version}/models/{model}:generateContent?key={GEMINI_API_KEY}"
+        try:
+            response = requests.post(url, headers=headers, json=data, timeout=10)
+            
+            if response.status_code == 200:
+                # 성공!
+                try:
+                    result_json = response.json()
+                    text = result_json['candidates'][0]['content']['parts'][0]['text'].strip()
+                    if text: return text
+                except:
+                    continue
+            else:
+                # 404 등 에러 발생 시 조용히 다음 조합으로 넘어감
+                # print(f"⚠️ {version}/{model} 실패 ({response.status_code})") 
                 continue
                 
-        except Exception as e:
-            print(f"⚠️ [{model}] 통신 오류: {e}")
+        except Exception:
             continue
             
-    return ""
+    return "" # 모든 조합 실패
 
 def summarize_article(text: str) -> str:
     prompt = (
-        "뉴스 요약 봇. 아래 글을 2줄 이내로 요약해.\n"
-        "형식: '- '로 시작.\n"
-        f"내용:\n{text[:3000]}"
+        "너는 뉴스 리포트 봇이야. 아래 기사 본문을 읽고 핵심 내용을 2~3줄로 요약해.\n"
+        "형식: '- '로 시작하는 개조식 문장.\n"
+        "조건: 감정을 배제하고 건조한 보고서체 사용.\n"
+        "주의: 서론 없이 바로 요약 내용만 출력.\n\n"
+        f"기사 본문:\n{text[:3500]}"
     )
-    return call_gemini_rest(prompt)
+    return call_gemini_robust(prompt)
 
 def repair_snippet(snippet: str) -> str:
     prompt = (
-        "문장 완성 봇. 아래 끊긴 문장을 자연스럽게 완성해.\n"
-        "형식: '- '로 시작.\n"
-        f"입력:\n{snippet}"
+        "너는 문장 교정 전문가야. 아래 텍스트는 기사 요약의 일부인데 문장이 잘려 있어.\n"
+        "내용을 추론하여 **완전한 하나의 요약 문장**으로 다듬어줘.\n"
+        "형식: '- '로 시작.\n\n"
+        f"입력 텍스트:\n{snippet}"
     )
-    return call_gemini_rest(prompt)
+    return call_gemini_robust(prompt)
 
-# ============== 본문 추출 (네이버 전용) ==============
+# ============== 본문 추출 ==============
 def extract_article_content(url: str) -> str:
     if not url: return ""
     headers = {
-        'User-Agent': 'Mozilla/5.0',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Referer': 'https://news.naver.com/'
     }
     try:
@@ -213,6 +223,7 @@ def send_email_report(df_new, target_date_str):
                 date = row['발행일(KST)']
                 summary = row['요약']
                 summary_html = summary.replace('\n', '<br>')
+                
                 border_color = kw_color if summary and "실패" not in summary else "#ddd"
                 
                 html_body += f"""
@@ -237,7 +248,7 @@ def send_email_report(df_new, target_date_str):
 
     html_body += """
             <div style="text-align: center; margin-top: 40px; font-size: 12px; color: #bdc3c7; border-top: 1px solid #eee; padding-top: 20px;">
-                Automated by GitHub Actions
+                Automated by GitHub Actions & Naver API
             </div>
         </div>
     </div>
@@ -281,7 +292,7 @@ def main():
 
     raw_rows = []
     for kw in KEYWORDS:
-        print(f"📡 수집 중: {kw}...")
+        print(f"📡 수집 중 (Naver): {kw}...")
         raw_rows.extend(crawl_naver_news(kw, target_date_str))
         time.sleep(0.5)
     
@@ -331,7 +342,9 @@ def main():
             summary = summarize_article(content)
             time.sleep(2)
         
+        # ★ 안전장치: AI가 실패하면 원문 요약을 보여줌 (빈칸 X)
         if not summary:
+            # 복원 시도
             restored = repair_snippet(api_desc)
             if restored:
                 summary = restored
