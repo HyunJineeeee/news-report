@@ -49,22 +49,19 @@ def is_similar(text1, text2):
     if not text1 or not text2: return False
     return difflib.SequenceMatcher(None, text1, text2).ratio() >= SIMILARITY_THRESHOLD
 
-# ============== AI 기능 (모든 버전/모델 순환 시도) ==============
+# ============== AI 기능 (상세 로그 출력) ==============
 def call_gemini_robust(prompt):
     if not GEMINI_API_KEY: 
         print("❌ [오류] API 키가 없습니다.")
         return ""
     
-    # 가능한 모든 조합 (버전 + 모델명)
-    # 최신 모델부터 구형 모델까지 순서대로 시도
+    # 시도할 조합 (버전 + 모델명)
     combinations = [
         ("v1beta", "gemini-1.5-flash"),
         ("v1beta", "gemini-1.5-flash-latest"),
-        ("v1beta", "gemini-1.5-flash-001"),
         ("v1", "gemini-1.5-flash"),
         ("v1beta", "gemini-pro"),
-        ("v1", "gemini-pro"),
-        ("v1beta", "gemini-1.0-pro")
+        ("v1", "gemini-pro")
     ]
     
     headers = {"Content-Type": "application/json"}
@@ -84,22 +81,26 @@ def call_gemini_robust(prompt):
             response = requests.post(url, headers=headers, json=data, timeout=10)
             
             if response.status_code == 200:
-                # 성공!
                 try:
                     result_json = response.json()
                     text = result_json['candidates'][0]['content']['parts'][0]['text'].strip()
-                    if text: return text
+                    if text:
+                        # ★ 성공 로그 출력
+                        # print(f"   ✅ [AI 성공] {model} ({version})") 
+                        return text
                 except:
                     continue
             else:
-                # 404 등 에러 발생 시 조용히 다음 조합으로 넘어감
-                # print(f"⚠️ {version}/{model} 실패 ({response.status_code})") 
+                # ★ 실패 로그 출력 (어떤 모델이 안되는지 확인용)
+                print(f"   ⚠️ [AI 실패] {model} ({version}) -> Status {response.status_code}, 다음 시도...")
                 continue
                 
-        except Exception:
+        except Exception as e:
+            print(f"   ⚠️ [AI 에러] {model} ({version}) -> {e}")
             continue
             
-    return "" # 모든 조합 실패
+    print("   ❌ [AI 완전 실패] 모든 모델 시도 실패")
+    return ""
 
 def summarize_article(text: str) -> str:
     prompt = (
@@ -342,14 +343,13 @@ def main():
             summary = summarize_article(content)
             time.sleep(2)
         
-        # ★ 안전장치: AI가 실패하면 원문 요약을 보여줌 (빈칸 X)
         if not summary:
-            # 복원 시도
+            # 실패 시 복원
             restored = repair_snippet(api_desc)
             if restored:
                 summary = restored
             else:
-                summary = f"- {api_desc}" # AI 완전 실패 시 원본
+                summary = f"- {api_desc}"
             
         row["요약"] = summary
         processed_rows.append(row)
